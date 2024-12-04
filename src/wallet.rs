@@ -10,6 +10,8 @@ use log::info;
 pub struct Wallet {
     pub secret_key: Vec<u8>,
     pub public_key: Vec<u8>,
+    //pub balance: u64, // Balance as an unsigned integer
+
 }
 
 impl Wallet {
@@ -23,9 +25,11 @@ impl Wallet {
         Wallet {
             secret_key,
             public_key,
+            //balance: 0,
         }
     }
 
+    // hashes the public_key and returns the address
     pub fn get_address(&self) -> String {
         let mut pub_hash = self.public_key.clone();
         Self::hash_pub_key(&mut pub_hash);
@@ -52,10 +56,13 @@ impl Wallet {
 }
 
 pub struct Wallets {
+    // address, Wallet
     wallets: HashMap<String, Wallet>,
 }
 
 impl Wallets {
+
+    // returns wallets that are stored on the device's db
     pub fn new() -> Result<Wallets> {
         let mut wlt = Wallets {
             wallets: HashMap::<String, Wallet>::new(),
@@ -65,13 +72,31 @@ impl Wallets {
         for item in db.into_iter() {
             let i = item?;
             let address = String::from_utf8(i.0.to_vec())?;
-            let wallet = bincode::deserialize(&i.1.to_vec())?;
+            let wallet: Wallet = bincode::deserialize(&i.1.to_vec())?;
+            
             wlt.wallets.insert(address, wallet);
         }
+
         drop(db);
         Ok(wlt)
     }
+    
+    // returns empty Wallets
+    pub fn default() -> Wallets {
+        Wallets {
+            wallets: HashMap::new()
+        }
+    }
 
+    pub fn get_wallets(&self) -> &HashMap<String, Wallet> {
+        &self.wallets
+    }
+
+    pub fn get_wallets_mut(&mut self) -> &mut HashMap<String, Wallet> {
+        &mut self.wallets
+    }
+
+    // Creates a new wallet address but doesn't save it on the db
     pub fn create_wallet(&mut self) -> String {
         let wallet = Wallet::new();
         let address = wallet.get_address();
@@ -92,6 +117,7 @@ impl Wallets {
         self.wallets.get(address)
     }
 
+    // saves all wallets | Meant as a function at the end of the application runtime
     pub fn save_all(&self) -> Result<()> {
         let db = sled::open("data/wallets")?;
 

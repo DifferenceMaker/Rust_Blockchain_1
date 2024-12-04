@@ -1,4 +1,4 @@
-use crate::cli::Cli;
+//use crate::cli::Cli;
 use crate::errors::Result;
 use eframe::egui;
 //use eframe::egui::IconData;
@@ -22,27 +22,13 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1000.0, 600.0])
-            .with_icon(load_icon("resources/images/icon.png")),
+            .with_icon(load_icon("resources/images/icon.png"))
+            .with_min_inner_size([800.0, 400.0])
+            .with_max_inner_size([1200.0, 800.0]),
         centered: true,
         ..Default::default()
     };    
 
-
-    /*let mut cli = match Cli::new() {
-        Ok(cli_instance) => cli_instance,
-        Err(e) => {
-            eprintln!("Failed to initialize CLI: {}", e);
-            return Err(e); // Or handle the error as needed
-        }
-    };
-    
-    if let Err(e) = cli.run() {
-        eprintln!("Failed to run CLI: {}", e);
-        return Err(e); // Or handle the error as needed
-    }*/
-
-
-    // Start program
     eframe::run_native(
         "BlockJain",
         options,
@@ -53,8 +39,6 @@ fn main() -> eframe::Result {
             // Create blockchain here and pass to default?
             // Just follow cli and try shit out.
 
-
-            // Returns the app that will be runned
             Ok(Box::<app::MyApp>::default())
         }),
     )

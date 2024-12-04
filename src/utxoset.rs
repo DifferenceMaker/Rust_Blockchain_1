@@ -3,9 +3,16 @@ use crate::block::*;
 use crate::blockchain::*;
 use std::collections::HashMap;
 use bincode::{deserialize, serialize};
+use bitcoincash_addr::Address;
 use sled;
 use tx::TXOutputs;
 use log::info;
+
+/*
+    An unspent transaction output (UTXO) 
+
+    This is a separate struct to keep track of UTXOs
+*/
 
 pub struct UTXOSet{
     pub blockchain: Blockchain,
@@ -67,6 +74,21 @@ impl UTXOSet {
         Ok(())
     }
 
+    pub fn get_balance(&self, address: &String) -> Result<i32> {
+        let pub_key_hash = Address::decode(address).unwrap().body;
+
+        let utxos: TXOutputs = self.find_utxo(&pub_key_hash)?;
+
+        let mut balance: i32 = 0;
+        for out in utxos.outputs {
+            balance += out.value;
+        }
+        println!("Balance of '{}'; {}", address, balance); 
+
+        Ok(balance)
+        
+    }
+
     pub fn count_transactions(&self) -> Result<i32> {
         let mut counter = 0;
         let db = sled::open("data/utxos")?;
@@ -106,7 +128,7 @@ impl UTXOSet {
         Ok((accumulated, unspent_outputs))
     }
 
-    /// FindUTXO finds UTXO for a public key hash
+    /// FindUTXO finds UTXOs for a public key hash
     pub fn find_utxo(&self, pub_key_hash: &[u8]) -> Result<TXOutputs> {
         let mut utxos = TXOutputs {
             outputs: Vec::new(),

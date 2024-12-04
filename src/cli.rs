@@ -91,6 +91,7 @@ impl Cli {
         if let Some(_) = matches.subcommand_matches("createwallet") {
             println!("address: {}", cmd_create_wallet()?);
         }
+        
         if let Some(_) = matches.subcommand_matches("reindex") {
             let count = cmd_reindex()?;
             println!("Done! There are {} transactions in the UTXO set.", count);
@@ -105,8 +106,7 @@ impl Cli {
             }
         }
 
-        // Checks if the command was "create"
-        if let Some(ref matches) = matches.subcommand_matches("create") {
+        /*if let Some(ref matches) = matches.subcommand_matches("create") {
             if let Some(address) = matches.get_one::<String>("ADDRESS") {
                 let address = String::from(address);
                 let bc = Blockchain::create_blockchain(address.clone())?;
@@ -114,9 +114,8 @@ impl Cli {
                 utxo_set.reindex()?;
                 println!("create blockchain");
             }
-        }
+        }*/
 
-        // Checks if the command was "get balance"
         if let Some(ref matches) = matches.subcommand_matches("getbalance") {
             if let Some(address) = matches.get_one::<String>("ADDRESS") {
                 

@@ -13,6 +13,10 @@ const GENESIS_COINBASE_DATA: &str =
     "The Times 03/Jan/2009 Chancellor on brink of second bailout for banks";
 
 
+/*
+    Blockhain struct has methods for dealing with UTXOs, Transactions and Blocks.  
+*/
+
 #[derive(Debug)]
 pub struct Blockchain {
     // tip - top of the blockchain
@@ -27,25 +31,54 @@ pub struct BlockchainIter<'a> {
 
 impl Blockchain {
 
-    // Opens db and fetches last hash
+    // Opens an existing blockchain or creates a new one with a fixed coinbase.
     pub fn new() -> Result<Blockchain> {
-        info!("open blockchain");
-
         let db = sled::open("data/blocks")?;
         let hash = match db.get("LAST")? {
-            Some(l) => l.to_vec(),
+            Some(last_hash) => last_hash.to_vec(),
             None => Vec::new(),
         };
-        info!("Found block database");
+
         let lasthash = if hash.is_empty() {
-            String::new()
+            // If no blocks exist, create the genesis block.
+            Blockchain::create_genesis_block(&db)?
         } else {
-            String::from_utf8(hash.to_vec())?
+            String::from_utf8(hash)?
         };
+
         Ok(Blockchain { tip: lasthash, db })
     }
 
-    /// CreateBlockchain creates a new blockchain DB
+    /// Creates the genesis block with a fixed coinbase transaction.
+    fn create_genesis_block(db: &sled::Db) -> Result<String> {
+        let fixed_address = "37DDLi4EneGFWKbhtYixWxj8yxkuG4RdM4".to_string();
+        let cbtx = Transaction::new_coinbase(fixed_address, "Genesis Block Reward".to_string())?;
+        let genesis = Block::new_genesis_block(cbtx);
+
+        // Insert the genesis block into the database.
+        db.insert(genesis.get_hash(), bincode::serialize(&genesis)?)?;
+        db.insert("LAST", genesis.get_hash().as_bytes())?;
+        db.flush()?;
+
+        Ok( genesis.get_hash() )
+    }
+    
+    // In theory, rarely used
+    /*
+        - Create a minimal, non-persistent blockchain instance.
+        - Use placeholder values for required fields.
+        - Avoid side effects like writing to disk or making network calls.
+     */
+    pub fn default_empty() -> Self {
+        Blockchain {
+            tip: String::new(), // Empty tip, no blocks
+            db: sled::Config::new()
+                .temporary(true) // Creates an in-memory database
+                .open()
+                .expect("Failed to create an in-memory database"),
+        }
+    }
+    /* /// Creates genesis block
     pub fn create_blockchain(address: String) -> Result<Blockchain> {
         info!("Creating new blockchain");
 
@@ -62,37 +95,10 @@ impl Blockchain {
         };
         bc.db.flush()?;
         Ok(bc)
-    }
+    } */
 
-    /// MineBlock mines a new block with the provided transactions
-    pub fn mine_block(&mut self, transactions: Vec<Transaction>) -> Result<Block> {
-        info!("mine a new block");
-
-        for tx in &transactions {
-            if !self.verify_transacton(tx)? {
-                return Err(format_err!("ERROR: Invalid transaction"));
-            }
-        }
-
-        let lasthash = self.db.get("LAST")?.unwrap();
-
-        let newblock = Block::new_block(
-            transactions,
-            String::from_utf8(lasthash.to_vec())?,
-            self.get_best_height()? + 1,
-        )?;
-
-        // k: hash, v: serialized
-        // k: last, v: hash
-        self.db.insert(newblock.get_hash(), bincode::serialize(&newblock)?)?;
-        self.db.insert("LAST", newblock.get_hash().as_bytes())?;
-        self.db.flush()?;
-
-        self.tip = newblock.get_hash();
-        Ok(newblock)
-    }
-
-
+    // ------------- UTXOs -------------
+ 
     // Function for finding all the unspent transactions
     fn find_unspent_transactions(&self, address: &[u8]) -> Vec<Transaction> {
         let mut spent_txos: HashMap<String, Vec<i32>> = HashMap::new();
@@ -230,6 +236,43 @@ impl Blockchain {
     }
 
     // ------------- BLOCKS -------------
+
+     /// MineBlock mines a new block with the provided transactions
+     pub fn mine_block(&mut self, transactions: Vec<Transaction>) -> Result<Block> {
+        /*
+            IMPLEMENT NEW COINBASE TRANSACTION AS A REWARD TO THE MINER
+
+            ?? - let cbtx = Transaction::new_coinbase(address, String::from(GENESIS_COINBASE_DATA))?;
+
+         */
+        info!("mine a new block");
+
+        // Verifies transactions
+        for tx in &transactions {
+            if !self.verify_transacton(tx)? {
+                return Err(format_err!("ERROR: Invalid transaction"));
+            }
+        }
+
+        // updates what the last hash is
+        let lasthash = self.db.get("LAST")?.unwrap();
+
+        let newblock = Block::new_block(
+            transactions,
+            String::from_utf8(lasthash.to_vec())?,
+            self.get_best_height()? + 1,
+        )?;
+
+        // k: hash, v: serialized
+        // k: last, v: hash
+        self.db.insert(newblock.get_hash(), bincode::serialize(&newblock)?)?;
+        self.db.insert("LAST", newblock.get_hash().as_bytes())?;
+        self.db.flush()?;
+
+        self.tip = newblock.get_hash();
+        Ok(newblock)
+    }
+
 
     pub fn add_block(&mut self, block: Block) -> Result<()> {
         let data = bincode::serialize(&block)?;
