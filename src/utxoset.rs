@@ -12,6 +12,8 @@ use log::info;
     An unspent transaction output (UTXO) 
 
     This is a separate struct to keep track of UTXOs
+    utxo is necessary to efficiently find unspent transaction outputs
+
 */
 
 pub struct UTXOSet{
@@ -20,6 +22,7 @@ pub struct UTXOSet{
 
 impl UTXOSet {
 
+    // Updates UTXOs
     pub fn reindex(&self) -> Result<()> {
         if let Err(_e) = std::fs::remove_dir_all("data/utxos") {
             info!("not exist any utxos to delete");
@@ -74,7 +77,7 @@ impl UTXOSet {
         Ok(())
     }
 
-    pub fn get_balance(&self, address: &String) -> Result<i32> {
+    /*pub fn get_balance(&self, address: &String) -> Result<i32> {
         let pub_key_hash = Address::decode(address).unwrap().body;
 
         let utxos: TXOutputs = self.find_utxo(&pub_key_hash)?;
@@ -87,7 +90,7 @@ impl UTXOSet {
 
         Ok(balance)
         
-    }
+    }*/
 
     pub fn count_transactions(&self) -> Result<i32> {
         let mut counter = 0;

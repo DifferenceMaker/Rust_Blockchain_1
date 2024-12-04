@@ -1,8 +1,7 @@
 use crate::errors::Result;
 use crate::transaction::Transaction;
 use std::time::SystemTime;
-use crypto::digest::Digest;
-use crypto::sha2::Sha256;
+use crypto::{ sha2::Sha256, digest::Digest };
 use log::info;
 use serde::{Deserialize, Serialize};
 use merkle_cbt::merkle_tree::Merge;

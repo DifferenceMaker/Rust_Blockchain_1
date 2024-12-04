@@ -50,8 +50,9 @@ impl Blockchain {
     }
 
     /// Creates the genesis block with a fixed coinbase transaction.
+    /// Only used when an existing db isn't located on device
     fn create_genesis_block(db: &sled::Db) -> Result<String> {
-        let fixed_address = "37DDLi4EneGFWKbhtYixWxj8yxkuG4RdM4".to_string();
+        let fixed_address = "35yLCpZy2MzPzyngA3YstWbyDhyhzjXBcw".to_string();
         let cbtx = Transaction::new_coinbase(fixed_address, "Genesis Block Reward".to_string())?;
         let genesis = Block::new_genesis_block(cbtx);
 
@@ -78,7 +79,8 @@ impl Blockchain {
                 .expect("Failed to create an in-memory database"),
         }
     }
-    /* /// Creates genesis block
+    /// Creates blockchain with a specific address as the rewardee for genesis block reward
+    /// For Custom implementations only
     pub fn create_blockchain(address: String) -> Result<Blockchain> {
         info!("Creating new blockchain");
 
@@ -95,7 +97,7 @@ impl Blockchain {
         };
         bc.db.flush()?;
         Ok(bc)
-    } */
+    } 
 
     // ------------- UTXOs -------------
  

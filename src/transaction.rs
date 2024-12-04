@@ -1,9 +1,6 @@
-
 use std::collections::HashMap;
-
-use crypto::ripemd160::Ripemd160;
-use crypto::{digest::Digest, ed25519};
-use crypto::sha2::Sha256;
+use ed25519_dalek::{VerifyingKey, Verifier, SigningKey, Signature, Signer};
+use crypto::{digest::Digest, ripemd160::Ripemd160, sha2::Sha256};
 use failure::format_err;
 use log::{error, info};
 use crate::utxoset::UTXOSet;
@@ -111,6 +108,7 @@ impl Transaction {
 
         for in_id in 0..self.vin.len() {
             let prev_tx = prev_txs.get(&self.vin[in_id].txid).unwrap();
+
             tx_copy.vin[in_id].signature.clear();
             tx_copy.vin[in_id].pub_key = prev_tx.vout[self.vin[in_id].vout as usize]
                 .pub_key_hash
@@ -118,13 +116,36 @@ impl Transaction {
             tx_copy.id = tx_copy.hash()?;
             tx_copy.vin[in_id].pub_key = Vec::new();
 
-            if !ed25519::verify(
-                &tx_copy.id.as_bytes(),
-                &self.vin[in_id].pub_key,
-                &self.vin[in_id].signature,
-            ) {
-                return Ok(false);
+        
+             // Convert public key and signature from bytes
+            let public_key_bytes = &self.vin[in_id].pub_key;
+            let signature_bytes = &self.vin[in_id].signature;
+
+            // Ensure the public key and signature lengths are valid
+            if public_key_bytes.len() != 32 || signature_bytes.len() != 64 {
+                return Err(format_err!("Invalid public key or signature length"));
             }
+
+             // Convert public key and signature from Vec<u8> to fixed-size arrays
+            let public_key_array: &[u8; 32] = public_key_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| format_err!("Failed to convert public key to fixed-size array"))?;
+            let signature_array: &[u8; 64] = signature_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| format_err!("Failed to convert signature to fixed-size array"))?;
+
+             // Create the PublicKey and Signature objects
+            let public_key = VerifyingKey::from_bytes(public_key_array)
+                .map_err(|_| format_err!("Failed to parse public key"))?;
+            let signature = Signature::from_bytes(signature_array);
+
+                // Verify the signature
+            if public_key.verify(tx_copy.id.as_bytes(), &signature).is_err() {
+                return Ok(false); // Verification failed
+            }
+            
         }
 
         Ok(true)
@@ -135,6 +156,19 @@ impl Transaction {
             return Ok(())
         }
 
+        // Ensure the private key is the correct length
+        if private_key.len() != 32 {
+            return Err(format_err!("Invalid private key length"));
+        }
+
+         // Convert the private key slice to a fixed-size array
+        let private_key_bytes: &[u8; 32] = private_key
+            .try_into()
+            .map_err(|_| format_err!("Private key must be 32 bytes"))?;
+
+        // Create a SigningKey from the private key bytes
+        let signing_key = SigningKey::from_bytes(private_key_bytes);
+
         for vin in &self.vin {
             if prev_txs.get(&vin.txid).unwrap().id.is_empty() {
                 return Err(format_err!("Error: Previous transaction is not corrent"));
@@ -144,13 +178,23 @@ impl Transaction {
 
         for in_id in 0..tx_copy.vin.len() {
             let prev_tx = prev_txs.get(&tx_copy.vin[in_id].txid).unwrap();
+
+            // Clear signature and set the public key in the transaction input
             tx_copy.vin[in_id].signature.clear();
             tx_copy.vin[in_id].pub_key = prev_tx.vout[tx_copy.vin[in_id].vout as usize]
-                .pub_key_hash.clone();
+                .pub_key_hash
+                .clone();
+            
+            // Hash the transaction copy
             tx_copy.id = tx_copy.hash()?;
-            tx_copy.vin[in_id].pub_key = Vec::new();
-            let signature = ed25519::signature(tx_copy.id.as_bytes(), private_key);
-            self.vin[in_id].signature = signature.to_vec();
+            tx_copy.vin[in_id].pub_key = Vec::new(); // Clear public key for signing
+
+            // Sign the transaction hash
+            let signature = signing_key.sign(tx_copy.id.as_bytes());
+
+             // Store the signature in the original transaction input
+            self.vin[in_id].signature = signature.to_bytes().to_vec();
+            //.to_bytes().to_vec();
         }
 
         Ok(())
