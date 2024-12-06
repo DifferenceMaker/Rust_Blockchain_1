@@ -3,10 +3,15 @@ use ed25519_dalek::{VerifyingKey, Verifier, SigningKey, Signature, Signer};
 use crypto::{digest::Digest, ripemd160::Ripemd160, sha2::Sha256};
 use failure::format_err;
 use log::{error, info};
+use rand::rngs::OsRng;
+use rand::RngCore;
 use crate::utxoset::UTXOSet;
 use crate::wallet::Wallet;
 use crate::{ errors::Result, tx::{TXInput, TXOutput}};
 use serde::{Deserialize, Serialize};
+use bitcoincash_addr::Address;
+
+const SUBSIDY: i32 = 10;
 
 
 #[derive( Serialize, Deserialize, Debug, Clone )]
@@ -19,15 +24,16 @@ pub struct Transaction {
 impl Transaction {
 
     pub fn new_utxo(wallet: &Wallet, to: &str, amount: i32, utxo: &UTXOSet) -> Result<Transaction> {
-        info!(
+        println!(
             "new UTXO Transaction from: {} to: {}",
-            wallet.get_address(),
-            to
+            &wallet.get_address(),
+            &to
         );
-        let mut vin = Vec::new();
 
-        let mut pub_key_hash = wallet.public_key.clone();
-        hash_pub_key(&mut pub_key_hash);
+        let mut vin = Vec::new();
+        
+        // Raw hash representation for comparison
+        let pub_key_hash = Address::decode(&wallet.get_address()).unwrap().body;
 
         let acc_v = utxo.find_spendable_outputs(&pub_key_hash, amount)?;
 
@@ -39,6 +45,7 @@ impl Transaction {
             ));
         }
 
+        // Construct transaction inputs (vin)
         for tx in acc_v.1 {
             for out in tx.1 {
                 let input = TXInput {
@@ -51,26 +58,45 @@ impl Transaction {
             }
         }
 
+        // Construct transaction outputs (vout)
         let mut vout = vec![TXOutput::new(amount, to.to_string())?];
+
+        // If there's change, send it back to the sender's address
         if acc_v.0 > amount {
-            vout.push(TXOutput::new(acc_v.0 - amount, wallet.get_address())?)
+            vout.push(TXOutput::new(acc_v.0 - amount, wallet.get_address())?);
         }
 
+        // Create the transaction
         let mut tx = Transaction {
             id: String::new(),
             vin,
             vout,
         };
+
+        // Generate the transaction hash
         tx.id = tx.hash()?;
+
         utxo.blockchain
             .sign_transacton(&mut tx, &wallet.secret_key)?;
+        
         Ok(tx)
     }
 
     pub fn new_coinbase(to: String, mut data: String) -> Result<Transaction> {
-        if data == String::from(""){
-            data += &format!("Reward to '{}'", to);
+        // When does this increase someones coinbase ?
+        // Where is this used* ^ 
+        println!("new coinbase Transaction to: {}", &to);
+
+        let mut key: [u8; 32] = [0; 32];
+        if data.is_empty() {
+            let mut rand = OsRng::default();
+            rand.fill_bytes(&mut key);
+            data = format!("Reward to '{}'", to);
         }
+
+        let mut pub_key = Vec::from(data.as_bytes());
+        pub_key.append(&mut Vec::from(key));
+        
 
         // Coinbase Transaction has no id, no txid
         let mut tx = Transaction {
@@ -79,9 +105,9 @@ impl Transaction {
                 txid: String::new(),
                 vout: -1,
                 signature: Vec::new(),
-                pub_key: Vec::from(data.as_bytes()),
+                pub_key,
             }],
-            vout : vec![TXOutput::new(100, to)?],            
+            vout: vec![TXOutput::new(SUBSIDY, to)?],
         };
 
         tx.id = tx.hash()?;
@@ -240,7 +266,7 @@ impl Transaction {
 
 }
 
-pub fn hash_pub_key(pub_key: &mut Vec<u8>) {
+/*pub fn hash_pub_key(pub_key: &mut Vec<u8>) {
     let mut hasher1 = Sha256::new();
     hasher1.input(pub_key);
     hasher1.result(pub_key);
@@ -249,4 +275,4 @@ pub fn hash_pub_key(pub_key: &mut Vec<u8>) {
     hasher2.input(pub_key);
     pub_key.resize(20, 0);
     hasher2.result(pub_key);
-}
+}*/

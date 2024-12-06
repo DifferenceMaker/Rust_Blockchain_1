@@ -3,6 +3,7 @@ use crate::errors::Result;
 use eframe::egui;
 //use eframe::egui::IconData;
 use egui::{FontData, FontFamily};
+use egui_extras::install_image_loaders;
 
 mod block;
 mod transaction;
@@ -35,7 +36,7 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             // Setup
             setup_fonts(&cc.egui_ctx); // Custom font setup
-
+            install_image_loaders(&cc.egui_ctx);
             // Create blockchain here and pass to default?
             // Just follow cli and try shit out.
 

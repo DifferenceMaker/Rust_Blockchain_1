@@ -116,6 +116,7 @@ impl UTXOSet {
             // txid is the key, outputs are the value
 
             for out_idx in 0..outs.outputs.len() {
+                // Can the output be unlocked with the public key?
                 if outs.outputs[out_idx].can_be_unlock_with(pub_key_hash) && accumulated < amount {
                     accumulated += outs.outputs[out_idx].value;
                     match unspent_outputs.get_mut(&txid) {
@@ -142,6 +143,7 @@ impl UTXOSet {
             let (_, v) = kv?;
             let outs: TXOutputs = bincode::deserialize(&v.to_vec())?;
 
+            // Goes through all utxos and checks if they are unlocked by that address
             for out in outs.outputs {
                 if out.can_be_unlock_with(pub_key_hash) {
                     utxos.outputs.push(out.clone())
@@ -151,8 +153,5 @@ impl UTXOSet {
 
         Ok(utxos)
     }
-    
-
-
 
 }

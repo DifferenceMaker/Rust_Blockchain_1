@@ -106,7 +106,7 @@ impl Cli {
             }
         }
 
-        /*if let Some(ref matches) = matches.subcommand_matches("create") {
+        if let Some(ref matches) = matches.subcommand_matches("create") {
             if let Some(address) = matches.get_one::<String>("ADDRESS") {
                 let address = String::from(address);
                 let bc = Blockchain::create_blockchain(address.clone())?;
@@ -114,7 +114,7 @@ impl Cli {
                 utxo_set.reindex()?;
                 println!("create blockchain");
             }
-        }*/
+        }
 
         if let Some(ref matches) = matches.subcommand_matches("getbalance") {
             if let Some(address) = matches.get_one::<String>("ADDRESS") {

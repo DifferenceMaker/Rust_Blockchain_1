@@ -82,7 +82,7 @@ impl Blockchain {
     /// Creates blockchain with a specific address as the rewardee for genesis block reward
     /// For Custom implementations only
     pub fn create_blockchain(address: String) -> Result<Blockchain> {
-        info!("Creating new blockchain");
+        println!("Creating new blockchain");
 
         std::fs::remove_dir_all("data/blocks").ok();
         let db = sled::open("data/blocks")?;

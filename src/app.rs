@@ -1,11 +1,13 @@
 use eframe::egui;
-use egui::Ui;
+use egui::{Ui};
 use failure::Fail;
 use crate::errors::Result;
 use bitcoincash_addr::{Address, HashType, Scheme};
 use crypto::{digest::Digest, ed25519, ripemd160::Ripemd160, sha2::Sha256};
 use hex;
 
+use std::fs::File;
+use std::io::Read;
 
 use crate::blockchain::Blockchain;
 use crate::server::Server;
@@ -14,7 +16,6 @@ use crate::tx::TXOutputs;
 use crate::utxoset::UTXOSet;
 use crate::wallet::*; 
 
-use rfd::FileDialog;
 
 #[derive(Debug, Fail)]
 pub enum WalletImportError {
@@ -40,6 +41,13 @@ pub struct MyApp {
     // Tabbing
     active_tab: Tab, // Track which section is active
 
+    // Transaction Tab
+    selected_wallet: Option<String>,
+    receiver_address: String,
+    tx_amount: i32,
+    tx_gas_price: i32,
+    tx_gas_limit: i32,
+
     // Popups
     show_delete_popup: Option<String>,
     show_add_existing_wallet_popup: bool,
@@ -52,16 +60,18 @@ impl MyApp {
         let mut wallets = Wallets::new()?; 
         
         // Uncomment to create a new blockchain with a new genesis block and genesis address (Use for Custom)        
-    
-        /*  let address = wallets.create_wallet();
+        /*
+            let address = wallets.create_wallet();        
             let blockchain = Blockchain::create_blockchain(address.clone())?;
         */
+        
+        
 
         // This can either load the existing blockchain or create a new genesis block. (Standard way)
         let blockchain = Blockchain::new()?;
         let utxo_set = UTXOSet { blockchain };
 
-        //utxo_set.reindex()?;
+        utxo_set.reindex()?;
 
         // initialize also server, miner, blockchain and utxo?
 
@@ -73,6 +83,13 @@ impl MyApp {
 
             show_delete_popup: None,
             show_add_existing_wallet_popup: false,
+
+            // Transaction Tab
+            selected_wallet: None,
+            receiver_address: String::from(""),
+            tx_amount: 0,
+            tx_gas_price: 0,
+            tx_gas_limit: 0,
         };
     
         // Update balances once during initialization
@@ -85,7 +102,9 @@ impl MyApp {
         let mut new_balances = Vec::new();
 
         for address in self.wallets.get_all_address() {
+            
             let pub_key_hash = Address::decode(&address).unwrap().body;
+            //println!("address: {}, pub_key_hash: {:?}", &address, &pub_key_hash);
 
             // Find all UTXOs for this address
             let utxos: TXOutputs = self.utxo_set.find_utxo(&pub_key_hash).unwrap_or_else(|_| {
@@ -168,6 +187,85 @@ impl MyApp {
         Ok(wallet)
     }
 
+    fn send_transaction(&mut self) -> Result<bool> {
+
+        let selected_wallet_name = match &self.selected_wallet {
+            Some(wallet_name) => wallet_name,
+            //failure::err_msg("No wallet selected")
+            None => return Err(failure::err_msg("No wallet selected")),
+        };
+        println!("From: {}", &selected_wallet_name);
+
+        // Retrieve the wallet
+        let wallet = match self.wallets.get_wallet(selected_wallet_name) {
+            Some(wallet) => wallet,
+            //failure::err_msg("Wallet not found for the selected address")
+            None => return Err(failure::err_msg("Wallet not found for the selected address")),
+        };
+        
+        // Validate receiver address
+
+        
+        if self.receiver_address.is_empty() {
+            return Err(failure::err_msg("Receiver address cannot be empty"));
+        }
+
+        println!("To: {}", &self.receiver_address);
+
+        
+        // Validate transaction amount
+        
+        if self.tx_amount <= 0 {
+            return Err(failure::err_msg("Transaction amount must be greater than zero"));
+        }
+
+        println!("Amount: {}", &self.tx_amount);
+        
+        let tx = Transaction::new_utxo(wallet, &self.receiver_address, self.tx_amount, &self.utxo_set)
+        .map_err(|e| failure::err_msg(e))?;
+
+
+        let mine_now = true;
+
+        if mine_now {
+            let cbtx = Transaction::new_coinbase(selected_wallet_name.to_string(), String::from("reward!"))
+            .map_err(|e| failure::err_msg(e))?;
+        
+            let new_block = self
+                .utxo_set
+                .blockchain
+                .mine_block(vec![cbtx, tx])
+                .map_err(|e|failure::err_msg(e))?;
+    
+            // Update the UTXO set with the new block
+            self.utxo_set
+                .update(&new_block)
+                .map_err(|e| failure::err_msg(e))?;
+
+        } else {
+            // Propagation
+            //Server::send_transaction(&tx, self.utxo_set)?;
+        }
+
+        Ok(true)
+
+    }
+
+    fn preview_transaction(&self) {
+
+        // display popup
+
+    }
+
+    fn clear_transaction_form(&mut self){
+        // Transaction Tab
+        self.selected_wallet = None;
+        self.receiver_address = String::from("");
+        self.tx_amount = 0;
+        self.tx_gas_price = 0;
+        self.tx_gas_limit = 0;
+    }
+
 }
 
 impl Default for MyApp {
@@ -185,6 +283,12 @@ impl Default for MyApp {
                 active_tab: Tab::Blockchain,
                 show_delete_popup: None,
                 show_add_existing_wallet_popup: false,
+
+                selected_wallet: None,
+                receiver_address: String::from(""),
+                tx_amount: 0,
+                tx_gas_price: 0,
+                tx_gas_limit: 0,
             }
         })
     }
@@ -263,6 +367,15 @@ impl eframe::App for MyApp {
                 Tab::Wallets => self.render_wallets_section(ui),
                 Tab::Settings => self.render_settings_section(ui),
             }
+
+            /*
+                Render notifications
+                // new coinbase added to your wallet 
+                // Transaction successful / unsuccessful
+                // new wallet created 
+                // ..
+                
+             */
         });
     
         
@@ -309,11 +422,112 @@ impl MyApp {
         
     }
 
-    fn render_transactions_section(&self, ui: &mut egui::Ui) {
+    fn render_transactions_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("Transactions");
         ui.label("View and create transactions.");
 
-        // forms for creating transactions or viewing transaction history
+        egui::Frame::none()
+        .rounding(egui::Rounding::same(5.0))
+        .fill(egui::Color32::from_rgb(20 ,20 , 20 ))
+        .inner_margin(egui::Margin::symmetric(20.0, 20.0)) 
+        .stroke(egui::Stroke::new(1.0, egui::Color32::BLACK))
+        .show(ui, |ui| {
+            ui.heading("Create New Transaction");
+
+            // Wallet Selection
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("From Wallet:"));
+            
+                // Borrow the wallets before the closure to avoid borrowing `self` inside
+                let wallet_entries: Vec<(String, String)> = self
+                    .wallets
+                    .iter()
+                    .map(|(address, _wallet)| {                        
+                        let balance = self.get_balance(&address).unwrap_or(0);
+                        let display_text = format!("{} - {} coins", address, balance);
+                        (address.clone(), display_text)
+                    })
+                    .collect();
+            
+                // Use the collected data in the dropdown
+                egui::ComboBox::from_label("")
+                    .selected_text(self.selected_wallet.clone().unwrap_or("Select Wallet".into()))
+                    .show_ui(ui, |ui| {
+                        for (address, display_text) in wallet_entries {
+                            if ui.selectable_value(&mut self.selected_wallet, Some(address.clone()), display_text).clicked() {
+                                self.selected_wallet = Some(address);
+                            }
+                        }
+                    });
+
+            });
+            
+            match &self.selected_wallet {
+                Some(wlt_address) => {
+                    let available_funds = self.get_balance(&wlt_address).unwrap_or(0);
+                    ui.label(egui::RichText::new(format!("Available Funds: {}", available_funds)));
+                },
+                None => {
+
+                }
+            }
+
+            ui.separator();
+
+            // Receiver Address
+            ui.horizontal(|ui| {
+                ui.label("To Address:");
+                ui.text_edit_singleline(&mut self.receiver_address);
+            });
+
+            // Amount
+            ui.horizontal(|ui| {
+                ui.label("Amount:");
+                ui.add(egui::DragValue::new(&mut self.tx_amount).speed(0.1));
+                ui.label("coins");
+            });
+
+            ui.separator();
+
+            // Gas and Gas Limit (Optional)
+            ui.collapsing("Advanced Options", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Gas Price:");
+                    ui.add(egui::DragValue::new(&mut self.tx_gas_price).speed(0.1));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Gas Limit:");
+                    ui.add(egui::DragValue::new(&mut self.tx_gas_limit).speed(0.1));
+                });
+            });
+
+            ui.separator();
+
+            // Buttons
+            ui.horizontal(|ui| {
+                if ui.button("Send Transaction").clicked() {
+                    let successful_tx = self.send_transaction();
+                    match successful_tx {
+                        Ok(b) => {
+                            println!("Success");
+
+                            let _ = self.update_balances();
+                        }
+                        Err(e) => {
+                            println!("Fail {}", e);
+                        }
+                    }
+
+                }
+                if ui.button("Preview").clicked() {
+                    self.preview_transaction();
+                }
+                if ui.button("Clear").clicked() {
+                    self.clear_transaction_form();
+                }
+            });
+        });
+
     }
 
     fn render_wallets_section(&mut self, ui: &mut egui::Ui) {
@@ -358,7 +572,7 @@ impl MyApp {
         // displays each wallet saved on the device
         egui::ScrollArea::vertical().show(ui, |ui: &mut Ui| {
             for address in &all_addresses {
-                let balance = self.get_balance(address).unwrap_or(0);
+                let balance = self.get_balance(&address).unwrap_or(0);
                 
                 egui::Frame::none()
                     .rounding(egui::Rounding::same(5.0))
@@ -371,7 +585,38 @@ impl MyApp {
                         ui.horizontal(|ui| {
                             // Left side: Address and Balance
                             ui.vertical(|ui| {
-                                ui.label(format!("Address: {}", address));
+
+                                
+                                ui.horizontal(|ui| {
+                                    // Add the label
+                                    let label_response = ui.add(
+                                        egui::Label::new(egui::RichText::new(format!("Address: {}", address)))
+                                            .sense(egui::Sense::click())
+                                    );
+
+                                    let icon_response = ui.add(
+                                        egui::Image::new(egui::include_image!("../resources/images/copy-to-clipboard-icon.png"))
+                                            .max_width(15.0)
+                                            .sense(egui::Sense::click())
+                                    );                                      
+
+                                    // Handle click behavior
+                                    if icon_response.clicked() || label_response.clicked() {
+                                        ui.output_mut(|o| o.copied_text = address.clone());
+                                    }
+
+                                    // Handle hover behavior
+                                    if icon_response.hovered() || label_response.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        
+                                        label_response
+                                            .on_hover_text("Click to Copy").highlight();
+
+                                        icon_response.on_hover_text("Click to Copy");
+                                    }
+
+                                });
+
                                 ui.label(format!("Balance: {:?} coins", balance));
                             });
 
@@ -388,8 +633,6 @@ impl MyApp {
                                     }
                                 });
                                     
-                                                      
-
                                 if ui.button("Export Wallet").clicked() {
                                     if let Some(wallet) = self.wallets.get_wallet(address) {
                                         if let Err(err) = self.export_wallet_to_file(address, wallet) {
@@ -403,7 +646,7 @@ impl MyApp {
                                     
                                     self.active_tab = Tab::Transactions;
 
-                                    // wallet_selected_for_transaction = address.clone().
+                                    self.selected_wallet = Some(address.clone());
                                 }
                                 if ui.button("Receive").clicked() {
                                     println!("Receive button clicked for wallet: {}", address);
@@ -455,7 +698,7 @@ impl MyApp {
 
         // Handle wallet deletion after the popup UI
         if let Some(wallet_to_delete) = delete_wallet_address {
-            self.delete_wallet(&wallet_to_delete);
+            let _ = self.delete_wallet(&wallet_to_delete);
         }
 
         if self.show_add_existing_wallet_popup {
@@ -519,4 +762,20 @@ impl MyApp {
 
     }
 
+}
+
+
+fn load_image(ctx: &egui::Context, src: &str, width: usize, height: usize) -> Result<egui::TextureHandle> {
+    // Open the file at the provided path
+    let mut file = File::open(src)?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer)?;
+
+    // Decode the image
+    let image = image::load_from_memory(&buffer)?.into_rgba8();
+    let size = [width as usize, height as usize];
+    let image_buffer = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+
+    // Load texture into egui
+    Ok(ctx.load_texture("icon", image_buffer, egui::TextureOptions::default()))
 }

@@ -160,5 +160,9 @@ impl Wallets {
         self.wallets.insert(String::from(address), wlt);
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Wallet)> {
+        self.wallets.iter()
+    }
+
 }
  
