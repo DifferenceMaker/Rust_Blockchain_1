@@ -21,12 +21,12 @@ pub struct Block {
 
 impl Block {
 
-    pub fn get_transactions(&self) -> &Vec<Transaction> {
-        &self.transactions
+    pub fn get_timestamp(&self) -> u128 {
+        self.timestamp
     }
 
-    pub fn get_height(&self) -> i32 {
-        self.height
+    pub fn get_transactions(&self) -> &Vec<Transaction> {
+        &self.transactions
     }
 
     pub(crate) fn get_prev_hash(&self) -> String {
@@ -35,6 +35,14 @@ impl Block {
 
     pub fn get_hash(&self) -> String {
         self.hash.clone()
+    }
+
+    pub fn get_height(&self) -> i32 {
+        self.height
+    }
+
+    pub fn get_nonce(&self) -> i32 {
+        self.nonce
     }
 
     pub fn new_genesis_block(coinbase: Transaction) -> Block {

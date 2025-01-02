@@ -1,6 +1,8 @@
+use chrono::{DateTime, NaiveDateTime, Utc};
 use eframe::egui;
 use egui::Ui;
 use failure::{Error, Fail};
+use crate::block::{self, Block};
 use crate::errors::Result;
 use bitcoincash_addr::{Address, HashType, Scheme};
 use crypto::{digest::Digest, ed25519, ripemd160::Ripemd160, sha2::Sha256};
@@ -17,7 +19,6 @@ use crate::tx::TXOutputs;
 use crate::utxoset::UTXOSet;
 use crate::wallet::*;
 use crate::runtime::RUNTIME; // Import the global runtime (tokio)
-
 
 #[derive(Debug, Fail)]
 pub enum WalletImportError {
@@ -50,15 +51,15 @@ pub struct MyApp {
     // Tabbing
     active_tab: Tab, // Track which section is active
 
+    // Blockchain Tab
+    blocks: Vec<Block>,
+
     // Transaction Tab
     selected_wallet: Option<String>,
     receiver_address: String,
     tx_amount: i32,
     tx_gas_price: i32,
     tx_gas_limit: i32,
-    //send_transaction_result: Option<Result<bool>>, // To track transaction results
-    //sending_transaction: bool,                            // To indicate ongoing async task
-
 
     // Notification Tab
     notifications: Vec<Notification>,
@@ -80,7 +81,6 @@ impl MyApp {
              - How many miners to allow
         */
 
-        // Load wallets
         let mut wallets = Wallets::new()?; 
 
         // Retrieve first wallet and its address. 
@@ -96,6 +96,13 @@ impl MyApp {
         let blockchain = Arc::new(RwLock::new(Blockchain::new()?));
         let utxo_set = Arc::new(RwLock::new(UTXOSet::new(Arc::clone(&blockchain))));
         utxo_set.write().await.reindex().await?;
+
+        let mut current_blocks:Vec<Block> = Vec::new();
+
+        // Get nodes blocks
+        for block_hash in &blockchain.read().await.get_block_hashes() {
+            current_blocks.push( blockchain.read().await.get_block(block_hash)?.clone() );
+        }
         
         let server = Arc::new(Server::new("8334", &mining_address, Arc::clone(&utxo_set))?);
 
@@ -117,9 +124,8 @@ impl MyApp {
             server: Arc::clone(&server),
             active_tab: Tab::Blockchain,
 
-            // Wallets Tab
-            show_delete_popup: None,
-            show_add_existing_wallet_popup: false,
+            // Blockchain Tab
+            blocks: current_blocks,
 
             // Transaction Tab
             selected_wallet: None,
@@ -128,10 +134,13 @@ impl MyApp {
             tx_gas_price: 0,
             tx_gas_limit: 0,
 
+            // Wallets Tab
+            show_delete_popup: None,
+            show_add_existing_wallet_popup: false,
+
             // Notification Tab
             notifications: Vec::new(),
             notification_counter: 0,
-
         };
     
         // Update balances once during initialization
@@ -266,68 +275,6 @@ impl MyApp {
         ))
     }
 
-    // (1) Checks for correct fields, (2) creates new utxo and (3) sends it with server.
-    /*async fn send_transaction(&mut self) -> Result<bool> {
-
-        /*
-            1. Wallet name
-            2. Wallet
-            3. Receiver Address
-            4. tx_amount
-            5. utxo_set
-            6. server
-        */
-
-        let selected_wallet_name = match &self.selected_wallet {
-            Some(wallet_name) => wallet_name,
-            None => return Err(failure::err_msg("No wallet selected")),
-        };
-        println!("From: {}", &selected_wallet_name);
-
-        let wallet = match self.wallets.get_wallet(selected_wallet_name) {
-            Some(wallet) => wallet,
-            None => return Err(failure::err_msg("Wallet not found for the selected address")),
-        };
-        
-        if self.receiver_address.is_empty() {
-            return Err(failure::err_msg("Receiver address cannot be empty"));
-        }
-        println!("To: {}", &self.receiver_address);
-        
-        if self.tx_amount <= 0 {
-            return Err(failure::err_msg("Transaction amount must be greater than zero"));
-        }
-        println!("Amount: {}", &self.tx_amount);
-        
-        let tx = Transaction::new_utxo(wallet, &self.receiver_address, self.tx_amount, &self.utxo_set).await
-        .map_err(|e| failure::err_msg(e))?;
-
-        // mine_now is just a bool variable for testing purposes
-        let mine_now = false;
-
-        if mine_now {
-            let cbtx = Transaction::new_coinbase(selected_wallet_name.to_string(), String::from("reward!"))
-            .map_err(|e| failure::err_msg(e))?;
-        
-            let new_block = self.utxo_set.write().await
-                .blockchain.write().await.mine_block(vec![cbtx, tx])
-                .map_err(|e|failure::err_msg(e))?;
-    
-            // Update the UTXO set with the new block
-            self.utxo_set.write().await.update(&new_block)
-                .map_err(|e| failure::err_msg(e))?;
-
-        } else {
-            // Propagate
-            self.server.send_transaction(&tx).await?; // Create and pass in the sender.
-
-            // Create new tokio::spawn for receiver which then adds a transaction msg.
-        }
-
-        Ok(true)
-
-    }*/
-
     pub async fn send_transaction(
         selected_wallet_name: String,
         wallet: Wallet,
@@ -363,7 +310,6 @@ impl MyApp {
     }
     
     
-
     fn preview_transaction(&self) {
 
         // display popup
@@ -390,7 +336,6 @@ impl MyApp {
         self.notifications.push(notification);
     }
 
-    // Generate a unique notification ID
     fn generate_notification_id(&mut self) -> u32 {
         self.notification_counter += 1;
         self.notification_counter
@@ -415,9 +360,8 @@ impl Default for MyApp {
             server: server,
             active_tab: Tab::Blockchain,
 
-            // Wallets Tab
-            show_delete_popup: None,
-            show_add_existing_wallet_popup: false,
+            // Blockchain Tab
+            blocks: Vec::new(),
 
             // Transaction Tab
             selected_wallet: None,
@@ -425,6 +369,10 @@ impl Default for MyApp {
             tx_amount: 0,
             tx_gas_price: 0,
             tx_gas_limit: 0,
+
+            // Wallets Tab
+            show_delete_popup: None,
+            show_add_existing_wallet_popup: false,
 
             // Notification Tab
             notifications: Vec::new(),
@@ -509,14 +457,6 @@ impl eframe::App for MyApp {
 
             self.render_notifications(ctx);
 
-            /*
-                Render notifications
-                // new coinbase added to your wallet 
-                // Transaction successful / unsuccessful
-                // new wallet created 
-                // ..
-                
-             */
         });
     
         
@@ -556,12 +496,75 @@ impl MyApp {
         ui.heading("Blockchain");
         ui.label("View and analyze the blockchain.");
 
-        /*        
-        block explorer,
+        /*
+            Add current block height. Current block hash. 
+            Search block?
 
+
+            update so it is horizontally scrollable. 
+            width and height as a block
+            
         */
-        
+    
+        // Create a horizontal scroll area for blocks
+        egui::ScrollArea::vertical()
+            .auto_shrink([true, false]) // Do not shrink horizontally, but shrink vertically
+            .enable_scrolling(true)    // Ensure mouse scrolling is enabled
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    for block in &self.blocks {
+                        egui::Frame::none()
+                            .rounding(egui::Rounding::same(5.0))
+                            .fill(egui::Color32::from_rgb(30, 30, 30))
+                            .inner_margin(egui::Margin::same(10.0))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::WHITE))
+                            .show(ui, |ui| {
+                                ui.vertical_centered(|ui| {
+                                    ui.label(format!(
+                                        "Block Hash: {}",
+                                        block.get_hash()
+                                    ));
+                                    ui.label(format!(
+                                        "Previous Hash: {}",
+                                        block.get_prev_hash()
+                                    ));
+                                    ui.label(format!(
+                                        "Height: {}",
+                                        block.get_height()
+                                    ));
+                                    ui.label(format!(
+                                        "Timestamp: {}",
+                                        convert_timestamp(block.get_timestamp())
+                                    ));
+                                    ui.label(format!("Nonce: {}", block.get_nonce()));
+    
+                                    let mut show_transactions = false;
+                                    if ui.button("Toggle Transactions").clicked() {
+                                        show_transactions = !show_transactions;
+                                    }
+    
+                                    if show_transactions {
+                                        egui::Frame::none()
+                                            .rounding(egui::Rounding::same(5.0))
+                                            .fill(egui::Color32::from_rgb(50, 50, 50))
+                                            .inner_margin(egui::Margin::same(10.0))
+                                            .stroke(egui::Stroke::new(1.0, egui::Color32::WHITE))
+                                            .show(ui, |ui| {
+                                                ui.label("Transactions:");
+                                                for tx in block.get_transactions() {
+                                                    ui.label(format!("Tx ID: {}", tx.id));
+                                                }
+                                            });
+                                    }
+                                });
+                            });
+                    }
+                });
+            });
     }
+    
+    
+    
 
     fn render_transactions_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("Transactions");
@@ -1011,18 +1014,12 @@ impl MyApp {
 
 }
 
-/*
-fn load_image(ctx: &egui::Context, src: &str, width: usize, height: usize) -> Result<egui::TextureHandle> {
-    // Open the file at the provided path
-    let mut file = File::open(src)?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
-
-    // Decode the image
-    let image = image::load_from_memory(&buffer)?.into_rgba8();
-    let size = [width as usize, height as usize];
-    let image_buffer = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-
-    // Load texture into egui
-    Ok(ctx.load_texture("icon", image_buffer, egui::TextureOptions::default()))
-}*/
+fn convert_timestamp(timestamp: u128) -> String {
+    let secs = (timestamp / 1000) as i64; // Convert milliseconds to seconds
+    let naive_datetime = NaiveDateTime::from_timestamp_opt(secs, 0)
+        .unwrap_or_else(|| Utc::now().naive_utc());
+    
+    // Convert NaiveDateTime to DateTime<Utc>
+    let datetime: DateTime<Utc> = DateTime::from_utc(naive_datetime, Utc);
+    datetime.format("%d-%m-%Y %H:%M:%S").to_string()
+}

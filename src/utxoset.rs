@@ -84,21 +84,6 @@ impl UTXOSet {
         Ok(())
     }
 
-    /*pub fn get_balance(&self, address: &String) -> Result<i32> {
-        let pub_key_hash = Address::decode(address).unwrap().body;
-
-        let utxos: TXOutputs = self.find_utxo(&pub_key_hash)?;
-
-        let mut balance: i32 = 0;
-        for out in utxos.outputs {
-            balance += out.value;
-        }
-        println!("Balance of '{}'; {}", address, balance); 
-
-        Ok(balance)
-        
-    }*/
-
     pub fn count_transactions(&self) -> Result<i32> {
         let mut counter = 0;
         let db = sled::open("data/utxos")?;

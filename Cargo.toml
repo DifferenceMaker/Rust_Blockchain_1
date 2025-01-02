@@ -27,3 +27,4 @@ ed25519-dalek = { version = "2.1.1", features = ["rand_core"]}
 tokio = { version = "1.42.0", features = ["full"] }
 futures = "0.3"
 once_cell = "1.20.2"
+chrono = "0.4.39"

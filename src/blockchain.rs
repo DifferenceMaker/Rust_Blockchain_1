@@ -241,12 +241,6 @@ impl Blockchain {
 
      /// MineBlock mines a new block with the provided transactions
      pub fn mine_block(&mut self, transactions: Vec<Transaction>) -> Result<Block> {
-        /*
-            IMPLEMENT NEW COINBASE TRANSACTION AS A REWARD TO THE MINER
-
-            ?? - let cbtx = Transaction::new_coinbase(address, String::from(GENESIS_COINBASE_DATA))?;
-
-         */
         info!("mine a new block");
 
         // Verifies transactions
