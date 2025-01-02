@@ -925,9 +925,12 @@ impl MyApp {
     fn render_settings_section(&mut self, _ui: &mut egui::Ui) {
        
         /*
-         Allow customization of user preferences, themes, or application-specific settings.
          Theme? 
+         Default-wallet
 
+         advanced settings:
+         server port
+         bootstrap_node
          */
 
 

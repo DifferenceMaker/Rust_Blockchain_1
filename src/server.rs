@@ -22,6 +22,9 @@ const KNOWN_NODE1: &str = "127.0.0.1:8335";
 const CMD_LEN: usize = 12;
 const VERSION: i32 = 1;
 
+/*
+    Kad tx aizsutits / new block izveidots vajag updatot application UI
+*/
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Blockmsg {
@@ -99,7 +102,7 @@ impl Server {
         node_set.insert(String::from(KNOWN_NODE1)); // bootstrap node
 
         Ok(Server {
-            node_address: String::from("0.0.0.0:") + port, // Switch to "localhost:"?
+            node_address: String::from("127.0.0.1:") + port, 
             mining_address: miner_address.to_string(),
 
             // thread-safe inner
@@ -120,7 +123,7 @@ impl Server {
         // Spawn a task for periodic blockchain state checks
         let server_clone = Arc::clone(&self);
         tokio::spawn(async move {
-            let mut interval_timer = interval(Duration::from_secs(5));
+            let mut interval_timer = interval(Duration::from_secs(20));
             loop {
                 interval_timer.tick().await;
                 if let Err(e) = server_clone.check_and_update_blockchain_state().await {
@@ -251,7 +254,7 @@ impl Server {
 
     }
 
-    // sends self.inner.known_nodes to addr
+    // sends known_nodes to addr
     async fn send_addr(&self, addr: &str) -> Result<()> {
         println!("Send address info to: {}", addr);
         let nodes = self.get_known_nodes().await;
@@ -341,8 +344,10 @@ impl Server {
         let my_best_height = self.get_best_height().await?;
 
         if my_best_height < msg.best_height {
+            println!("my_best_height < msg.best_height");
             let _ = self.send_get_blocks(&msg.addr_from).await;
         } else if my_best_height > msg.best_height {
+            println!("man lielaks");
             let _ = self.send_version(&msg.addr_from).await;
         }
 
@@ -363,6 +368,7 @@ impl Server {
         let known_nodes = self.get_known_nodes().await;
 
         if self.node_address == KNOWN_NODE1 {
+            // if the node is KNOWN_NODE1 then it broadcasts the transaction to all other known nodes except the sender
             for node in known_nodes {
                 if node != self.node_address && node != msg.addr_from {
                     self.send_inv(&node, "tx", vec![msg.transaction.id.clone()]).await?;
@@ -372,10 +378,12 @@ impl Server {
             let mut mempool = self.get_mempool().await;
             println!("Current mempool: {:#?}", &mempool);
 
+            // if there are txs in mempool and this node is a miner node
             if mempool.len() >= 1 && !self.mining_address.is_empty() {
                 loop {
                     let mut txs: Vec<Transaction> = Vec::new();
 
+                    // verify txs in mempool
                     for (_, tx) in &mempool {
                         if self.verify_tx(tx).await? {
                             txs.push(tx.clone());
@@ -386,16 +394,20 @@ impl Server {
                         return Ok(());
                     }
 
+                    // create new coinbase with miner node as recipient and push at the end of txs
                     let cbtx = Transaction::new_coinbase(self.mining_address.clone(), String::new())?;
                     txs.push(cbtx);
+
 
                     for tx in &txs {
                         mempool.remove(&tx.id);
                     }
 
+                    // creates new block and reindexes node's utxo
                     let new_block = self.mine_block(txs).await?;
                     self.utxo_reindex().await?;
 
+                    // Broadcasts the new block to other known nodes.
                     for node in self.get_known_nodes().await {
                         if node != self.node_address {
                             self.send_inv(&node, "block", vec![new_block.get_hash()]).await?;
@@ -406,6 +418,8 @@ impl Server {
                         break;
                     }
                 }
+
+                // clears mempool
                 self.clear_mempool().await;
             }
         }
