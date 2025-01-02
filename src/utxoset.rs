@@ -2,8 +2,10 @@ use super::*;
 use crate::block::*;
 use crate::blockchain::*;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use bincode::{deserialize, serialize};
-use bitcoincash_addr::Address;
+
 use sled;
 use tx::TXOutputs;
 use log::info;
@@ -17,19 +19,24 @@ use log::info;
 */
 
 pub struct UTXOSet{
-    pub blockchain: Blockchain,
+    pub blockchain: Arc<RwLock<Blockchain>>, // Shared blockchain instance
 }
 
 impl UTXOSet {
 
+    pub fn new(blockchain: Arc<RwLock<Blockchain>>) -> Self {
+        Self { blockchain }
+    }
+
     // Updates UTXOs
-    pub fn reindex(&self) -> Result<()> {
+    pub async fn reindex(&self) -> Result<()> {
         if let Err(_e) = std::fs::remove_dir_all("data/utxos") {
             info!("not exist any utxos to delete");
         }
         let db = sled::open("data/utxos")?;
 
-        let utxos = self.blockchain.find_utxo();
+        let blockchain = self.blockchain.read().await;
+        let utxos = blockchain.find_utxo();
 
         for (txid, outs) in utxos {
             db.insert(txid.as_bytes(), serialize(&outs)?)?;

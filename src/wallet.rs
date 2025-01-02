@@ -3,9 +3,9 @@ use crate::errors::Result;
 
 use bitcoincash_addr::{Address, HashType, Scheme, Network};
 use crypto::{digest::Digest, ripemd160::Ripemd160, sha2::Sha256};
-use ed25519_dalek::{SigningKey /* secret key */, Signature, Signer, Verifier, VerifyingKey /* public_key */};
+use ed25519_dalek::SigningKey;
 
-use rand::{RngCore, rngs::OsRng};
+use rand::rngs::OsRng;
 use serde::{Serialize, Deserialize};
 use log::info;
 

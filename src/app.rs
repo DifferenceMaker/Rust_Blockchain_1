@@ -1,20 +1,22 @@
 use eframe::egui;
-use egui::{Ui};
-use failure::Fail;
+use egui::Ui;
+use failure::{Error, Fail};
 use crate::errors::Result;
 use bitcoincash_addr::{Address, HashType, Scheme};
 use crypto::{digest::Digest, ed25519, ripemd160::Ripemd160, sha2::Sha256};
 use hex;
+use log::error;
 
-use std::fs::File;
-use std::io::Read;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crate::blockchain::Blockchain;
 use crate::server::Server;
 use crate::transaction::Transaction;
 use crate::tx::TXOutputs;
 use crate::utxoset::UTXOSet;
-use crate::wallet::*; 
+use crate::wallet::*;
+use crate::runtime::RUNTIME; // Import the global runtime (tokio)
 
 
 #[derive(Debug, Fail)]
@@ -31,12 +33,19 @@ enum Tab {
     Settings,
 }
 
-pub struct MyApp {
+struct Notification {
+    pub id: u32,              // Unique ID for each notification
+    pub message: String,
+    pub start_time: std::time::Instant,  // When the notification was created
+    pub duration: u64,        // Duration in seconds before auto-dismissal
+}
 
+pub struct MyApp {
     // Blockchain specific
     wallets: Wallets,
     balances: Vec<i32>,
-    utxo_set: UTXOSet,
+    utxo_set: Arc<RwLock<UTXOSet>>,
+    server: Arc<Server>,
 
     // Tabbing
     active_tab: Tab, // Track which section is active
@@ -47,6 +56,13 @@ pub struct MyApp {
     tx_amount: i32,
     tx_gas_price: i32,
     tx_gas_limit: i32,
+    //send_transaction_result: Option<Result<bool>>, // To track transaction results
+    //sending_transaction: bool,                            // To indicate ongoing async task
+
+
+    // Notification Tab
+    notifications: Vec<Notification>,
+    notification_counter: u32,
 
     // Popups
     show_delete_popup: Option<String>,
@@ -54,33 +70,54 @@ pub struct MyApp {
 }
 
 impl MyApp {
-    fn try_default() -> Result<Self> {
+    pub async fn initialize_async() -> Result<Self> {
+        // Load Settings to get preferences for node.
+        /*
+             - Regular node vs also miner node
+             - connect node list? 
+             - Use a default port like 8333 for Bitcoin-like blockchains.
+             - Interval for blockchain check
+             - How many miners to allow
+        */
 
         // Load wallets
         let mut wallets = Wallets::new()?; 
+
+        // Retrieve first wallet and its address. 
+        let mining_address =  wallets.get_all_address().get(0).cloned().unwrap_or_default();
         
         // Uncomment to create a new blockchain with a new genesis block and genesis address (Use for Custom)        
         /*
             let address = wallets.create_wallet();        
             let blockchain = Blockchain::create_blockchain(address.clone())?;
-        */
-        
-        
+        */        
 
         // This can either load the existing blockchain or create a new genesis block. (Standard way)
-        let blockchain = Blockchain::new()?;
-        let utxo_set = UTXOSet { blockchain };
+        let blockchain = Arc::new(RwLock::new(Blockchain::new()?));
+        let utxo_set = Arc::new(RwLock::new(UTXOSet::new(Arc::clone(&blockchain))));
+        utxo_set.write().await.reindex().await?;
+        
+        let server = Arc::new(Server::new("8334", &mining_address, Arc::clone(&utxo_set))?);
 
-        utxo_set.reindex()?;
-
-        // initialize also server, miner, blockchain and utxo?
+        // Pass an arc-clone to tokio::spawn which is in charge of server logic
+        tokio::spawn({
+            let server_clone = Arc::clone(&server);
+            async move {
+                if let Err(e) = server_clone.start_server().await {
+                    error!("Server error: {}", e);
+                }
+            }
+        });
 
         let mut app = MyApp {
             wallets,
             balances: Vec::new(),
-            utxo_set,
+            utxo_set: Arc::clone(&utxo_set),
+            // pass an arc-clone to MyApp struct to have availability to the network
+            server: Arc::clone(&server),
             active_tab: Tab::Blockchain,
 
+            // Wallets Tab
             show_delete_popup: None,
             show_add_existing_wallet_popup: false,
 
@@ -90,15 +127,20 @@ impl MyApp {
             tx_amount: 0,
             tx_gas_price: 0,
             tx_gas_limit: 0,
+
+            // Notification Tab
+            notifications: Vec::new(),
+            notification_counter: 0,
+
         };
     
         // Update balances once during initialization
-        app.update_balances()?;
+        app.update_balances().await?;
         Ok(app)
     }
 
     /// Updates the balances vector based on the current UTXO set.
-    pub fn update_balances(&mut self) -> Result<()> {
+    pub async fn update_balances(&mut self) -> Result<()> {
         let mut new_balances = Vec::new();
 
         for address in self.wallets.get_all_address() {
@@ -107,7 +149,7 @@ impl MyApp {
             //println!("address: {}, pub_key_hash: {:?}", &address, &pub_key_hash);
 
             // Find all UTXOs for this address
-            let utxos: TXOutputs = self.utxo_set.find_utxo(&pub_key_hash).unwrap_or_else(|_| {
+            let utxos: TXOutputs = self.utxo_set.read().await.find_utxo(&pub_key_hash).unwrap_or_else(|_| {
                 TXOutputs {
                     outputs: vec![],
                 }
@@ -141,7 +183,10 @@ impl MyApp {
 
     pub fn delete_wallet(&mut self, address: &str) -> Result<()> {
         self.wallets.delete_wallet(address)?;
-        println!("Wallet Deleted (Address): {}", &address);
+
+        let message = format!("Wallet Deleted (Address): {}", &address);
+        self.add_notification(message);
+
         // Update balances: Assuming balances align with wallet order
         if let Some(index) = self.wallets.get_all_address().iter().position(|a| a == address) {
             self.balances.remove(index);
@@ -187,69 +232,137 @@ impl MyApp {
         Ok(wallet)
     }
 
-    fn send_transaction(&mut self) -> Result<bool> {
+    fn valid_tx_fields(&self) -> Result<(String, Wallet, String, i32)> {
+        let selected_wallet_name = self
+            .selected_wallet
+            .as_ref()
+            .ok_or_else(|| failure::err_msg("No wallet selected"))?
+            .clone();
+    
+        println!("From: {}", selected_wallet_name);
+    
+        let wallet = self
+            .wallets
+            .get_wallet(&selected_wallet_name)
+            .ok_or_else(|| failure::err_msg("Wallet not found for the selected address"))?;
+    
+        if self.receiver_address.is_empty() {
+            return Err(failure::err_msg("Receiver address cannot be empty"));
+        }
+    
+        println!("To: {}", self.receiver_address);
+    
+        if self.tx_amount <= 0 {
+            return Err(failure::err_msg("Transaction amount must be greater than zero"));
+        }
+    
+        println!("Amount: {}", self.tx_amount);
+    
+        Ok((
+            selected_wallet_name,
+            wallet.clone(),
+            self.receiver_address.clone(),
+            self.tx_amount,
+        ))
+    }
+
+    // (1) Checks for correct fields, (2) creates new utxo and (3) sends it with server.
+    /*async fn send_transaction(&mut self) -> Result<bool> {
+
+        /*
+            1. Wallet name
+            2. Wallet
+            3. Receiver Address
+            4. tx_amount
+            5. utxo_set
+            6. server
+        */
 
         let selected_wallet_name = match &self.selected_wallet {
             Some(wallet_name) => wallet_name,
-            //failure::err_msg("No wallet selected")
             None => return Err(failure::err_msg("No wallet selected")),
         };
         println!("From: {}", &selected_wallet_name);
 
-        // Retrieve the wallet
         let wallet = match self.wallets.get_wallet(selected_wallet_name) {
             Some(wallet) => wallet,
-            //failure::err_msg("Wallet not found for the selected address")
             None => return Err(failure::err_msg("Wallet not found for the selected address")),
         };
-        
-        // Validate receiver address
-
         
         if self.receiver_address.is_empty() {
             return Err(failure::err_msg("Receiver address cannot be empty"));
         }
-
         println!("To: {}", &self.receiver_address);
-
-        
-        // Validate transaction amount
         
         if self.tx_amount <= 0 {
             return Err(failure::err_msg("Transaction amount must be greater than zero"));
         }
-
         println!("Amount: {}", &self.tx_amount);
         
-        let tx = Transaction::new_utxo(wallet, &self.receiver_address, self.tx_amount, &self.utxo_set)
+        let tx = Transaction::new_utxo(wallet, &self.receiver_address, self.tx_amount, &self.utxo_set).await
         .map_err(|e| failure::err_msg(e))?;
 
-
-        let mine_now = true;
+        // mine_now is just a bool variable for testing purposes
+        let mine_now = false;
 
         if mine_now {
             let cbtx = Transaction::new_coinbase(selected_wallet_name.to_string(), String::from("reward!"))
             .map_err(|e| failure::err_msg(e))?;
         
-            let new_block = self
-                .utxo_set
-                .blockchain
-                .mine_block(vec![cbtx, tx])
+            let new_block = self.utxo_set.write().await
+                .blockchain.write().await.mine_block(vec![cbtx, tx])
                 .map_err(|e|failure::err_msg(e))?;
     
             // Update the UTXO set with the new block
-            self.utxo_set
-                .update(&new_block)
+            self.utxo_set.write().await.update(&new_block)
                 .map_err(|e| failure::err_msg(e))?;
 
         } else {
-            // Propagation
-            //Server::send_transaction(&tx, self.utxo_set)?;
+            // Propagate
+            self.server.send_transaction(&tx).await?; // Create and pass in the sender.
+
+            // Create new tokio::spawn for receiver which then adds a transaction msg.
         }
 
         Ok(true)
 
+    }*/
+
+    pub async fn send_transaction(
+        selected_wallet_name: String,
+        wallet: Wallet,
+        receiver_address: String,
+        tx_amount: i32,
+        utxo_set: Arc<RwLock<UTXOSet>>,
+        server: Arc<Server>,
+    ) -> Result<bool> {
+        let tx = Transaction::new_utxo(&wallet, &receiver_address, tx_amount, &utxo_set)
+            .await
+            .map_err(|e| failure::err_msg(e))?;
+    
+        let mine_now = false;
+
+        if mine_now {
+            let cbtx = Transaction::new_coinbase(selected_wallet_name, String::from("reward!"))
+                .map_err(|e| failure::err_msg(e))?;
+    
+            let new_block = utxo_set.write().await
+                .blockchain.write().await
+                .mine_block(vec![cbtx, tx])
+                .map_err(|e| failure::err_msg(e))?;
+    
+            utxo_set.write().await
+                .update(&new_block)
+                .map_err(|e| failure::err_msg(e))?;
+
+        } else {
+            server.send_transaction(&tx).await?;
+        }
+    
+        Ok(true)
     }
+    
+    
 
     fn preview_transaction(&self) {
 
@@ -266,31 +379,57 @@ impl MyApp {
         self.tx_gas_limit = 0;
     }
 
+    pub fn add_notification(&mut self, message: String) {
+        let notification = Notification {
+            id: self.generate_notification_id(),
+            message,
+            start_time: std::time::Instant::now(),
+            duration: 10, // 10 seconds
+        };
+
+        self.notifications.push(notification);
+    }
+
+    // Generate a unique notification ID
+    fn generate_notification_id(&mut self) -> u32 {
+        self.notification_counter += 1;
+        self.notification_counter
+    }
+
 }
 
 impl Default for MyApp {
     fn default() -> Self {
-        Self::try_default().unwrap_or_else(|e| {
-            eprintln!("Failed to initialize MyApp: {}", e);
+        // Create the `utxo_set` first, since it is needed by `server`
+        let utxo_set = Arc::new(RwLock::new(UTXOSet {
+            blockchain: Arc::new(RwLock::new(Blockchain::default_empty())),
+        }));
 
-            // Provide a reasonable fallback state (blank app)
-            Self {
-                wallets: Wallets::default(),
-                balances: Vec::new(),
-                utxo_set: UTXOSet {
-                    blockchain: Blockchain::default_empty(),
-                },
-                active_tab: Tab::Blockchain,
-                show_delete_popup: None,
-                show_add_existing_wallet_popup: false,
+        // Use `utxo_set` to create the `server`
+        let server:Arc<Server> = Arc::new(Server::new("8334", "", Arc::clone(&utxo_set)).unwrap());
 
-                selected_wallet: None,
-                receiver_address: String::from(""),
-                tx_amount: 0,
-                tx_gas_price: 0,
-                tx_gas_limit: 0,
-            }
-        })
+        Self {
+            wallets: Wallets::default(),
+            balances: Vec::new(),
+            utxo_set: utxo_set,
+            server: server,
+            active_tab: Tab::Blockchain,
+
+            // Wallets Tab
+            show_delete_popup: None,
+            show_add_existing_wallet_popup: false,
+
+            // Transaction Tab
+            selected_wallet: None,
+            receiver_address: String::new(),
+            tx_amount: 0,
+            tx_gas_price: 0,
+            tx_gas_limit: 0,
+
+            // Notification Tab
+            notifications: Vec::new(),
+            notification_counter: 0,
+        }
     }
 }
 
@@ -368,6 +507,8 @@ impl eframe::App for MyApp {
                 Tab::Settings => self.render_settings_section(ui),
             }
 
+            self.render_notifications(ctx);
+
             /*
                 Render notifications
                 // new coinbase added to your wallet 
@@ -382,13 +523,13 @@ impl eframe::App for MyApp {
     
     }
 
-    fn save(&mut self, storage: &mut dyn eframe::Storage) { // automatically every 30 seconds
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) { // automatically every 30 seconds
         /*  you can store user preferences, settings, or wallets. */
         // Use it to save non-critical data that doesn't need to be immediately updated on every change
         // Melnraksta Transactions... ; Mempool?
     }
 
-    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         /* Double-check that all critical user data is saved (e.g., wallets, settings, blockchain state). */
         /* Close any open files, terminate threads, or gracefully shut down networking resources. */
 
@@ -462,14 +603,9 @@ impl MyApp {
 
             });
             
-            match &self.selected_wallet {
-                Some(wlt_address) => {
-                    let available_funds = self.get_balance(&wlt_address).unwrap_or(0);
-                    ui.label(egui::RichText::new(format!("Available Funds: {}", available_funds)));
-                },
-                None => {
-
-                }
+            if let Some(wlt_address) = &self.selected_wallet {
+                let available_funds = self.get_balance(&wlt_address).unwrap_or(0);
+                ui.label(egui::RichText::new(format!("Available Funds: {}", available_funds)));
             }
 
             ui.separator();
@@ -506,17 +642,48 @@ impl MyApp {
             // Buttons
             ui.horizontal(|ui| {
                 if ui.button("Send Transaction").clicked() {
-                    let successful_tx = self.send_transaction();
-                    match successful_tx {
-                        Ok(b) => {
-                            println!("Success");
 
-                            let _ = self.update_balances();
-                        }
-                        Err(e) => {
-                            println!("Fail {}", e);
-                        }
+                    let (tx_complete, mut rx_complete) = tokio::sync::mpsc::channel::<bool>(1);
+
+                    // Extract only the necessary references from `MyApp`
+                    let server = Arc::clone(&self.server);
+                    let utxo_set = Arc::clone(&self.utxo_set);
+
+                    if let Ok((selected_wallet_name, wallet, receiver_address, tx_amount)) = self.valid_tx_fields() {
+                        
+                        RUNTIME.spawn(async move {
+                            let result = MyApp::send_transaction(
+                                selected_wallet_name,
+                                wallet,
+                                receiver_address,
+                                tx_amount,
+                                utxo_set,
+                                server,
+                            )
+                            .await
+                            .unwrap_or(false);
+                
+                            // Send the result back to the main thread
+                            let _ = tx_complete.send(result).await;
+                        });
+                        
+                        // Add a separate task to listen to rx_complete
+                        RUNTIME.spawn(async move {
+                            while let Some(success) = rx_complete.recv().await {
+                                if success {
+                                    println!("Transaction successfully propagated.");
+                                    // It is propagated but not mined. 
+                                } else {
+                                    println!("Failed to propagate transaction.");
+                                }
+                            }
+                        });
+                        
+                    } else {
+                        // Handle validation errors here, such as showing a message to the user
+                        println!("Invalid transaction fields!");
                     }
+                    
 
                 }
                 if ui.button("Preview").clicked() {
@@ -529,6 +696,7 @@ impl MyApp {
         });
 
     }
+
 
     fn render_wallets_section(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -554,6 +722,8 @@ impl MyApp {
                     }                    
 
                     let _ = self.update_balances();
+                    self.add_notification("New wallet created successfully.".to_string());
+
                 }
         
                 ui.add_space(10.0); // Space between buttons
@@ -689,6 +859,7 @@ impl MyApp {
                                 // Mark wallet for deletion outside this closure
                                 delete_wallet_address = Some(wallet_to_delete.clone());
                                 self.show_delete_popup = None; // Close the popup
+
                             }
                         });
                         
@@ -751,7 +922,7 @@ impl MyApp {
         
     }
 
-    fn render_settings_section(&mut self, ui: &mut egui::Ui) {
+    fn render_settings_section(&mut self, _ui: &mut egui::Ui) {
        
         /*
          Allow customization of user preferences, themes, or application-specific settings.
@@ -762,9 +933,82 @@ impl MyApp {
 
     }
 
+    fn render_notifications(&mut self, ctx: &egui::Context) {
+        // Calculate notification timeout and filter out expired notifications
+        let now = std::time::Instant::now();
+        self.notifications.retain(|n| now.duration_since(n.start_time).as_secs() < n.duration);
+    
+        // Bottom-right corner positioning
+        let screen_rect = ctx.screen_rect();
+        let mut y_offset = screen_rect.max.y - 15.0; // Start 15 px from the bottom
+        let x_offset = screen_rect.max.x - 350.0 - 15.0;    // Notifications are 300 px wide + 15px margin
+    
+        let mut to_remove = Vec::new(); // Collect IDs of notifications to remove
+
+        for notification in &self.notifications {
+            // Calculate the position for this notification
+            let notification_rect = egui::Rect::from_min_size(
+                egui::pos2(x_offset, y_offset - 75.0), // Notification height = 50 px
+                egui::vec2(350.0, 75.0),
+            );
+            
+            egui::Area::new(egui::Id::new(notification.id))
+                .fixed_pos(notification_rect.min)
+                .show(ctx, |ui| {
+                    // Draw the background and border
+                    let painter = ui.painter();
+                    painter.rect_filled(
+                        notification_rect,
+                        5.0, // Corner radius
+                        egui::Color32::from_rgb(25, 25, 25), // Background color
+                    );
+                    painter.rect_stroke(
+                        notification_rect,
+                        5.0, // Corner radius
+                        egui::Stroke::new(2.0, egui::Color32::WHITE), // Border width and color
+                    );
+
+                    // Constrain the UI to the rectangle width for wrapping
+                    ui.set_min_width(notification_rect.width());
+                    ui.set_max_width(notification_rect.width());
+
+                    // Create the content
+                    ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::RightToLeft), |ui| {
+                        ui.horizontal(|ui| {
+                            // Smaller "x" button
+                            ui.add_space(15.0);
+                            
+                            ui.style_mut().spacing.button_padding = egui::Vec2::new(7.5, 7.5);
+
+
+                            let close_button = ui.add_sized([5.0, 5.0], egui::Button::new("X"));
+                  
+                            if close_button.clicked() {
+                                to_remove.push(notification.id); // Schedule for removal
+                            }
+
+
+                            // Centered, wrapped label
+                            ui.add(egui::Label::new(egui::RichText::new(&notification.message)
+                                .color(egui::Color32::WHITE)
+                                .text_style(egui::TextStyle::Body))
+                                .wrap()
+                            ); // Enable text wrapping
+                        });
+                    });
+                });
+
+    
+            y_offset -= 90.0; // Stack next notification 10 px above the current one
+        }
+
+        self.notifications.retain(|n| !to_remove.contains(&n.id));
+
+    }
+
 }
 
-
+/*
 fn load_image(ctx: &egui::Context, src: &str, width: usize, height: usize) -> Result<egui::TextureHandle> {
     // Open the file at the provided path
     let mut file = File::open(src)?;
@@ -778,4 +1022,4 @@ fn load_image(ctx: &egui::Context, src: &str, width: usize, height: usize) -> Re
 
     // Load texture into egui
     Ok(ctx.load_texture("icon", image_buffer, egui::TextureOptions::default()))
-}
+}*/

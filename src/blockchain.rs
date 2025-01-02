@@ -299,7 +299,7 @@ impl Blockchain {
         Ok(block)
     }
 
-     /// GetBestHeight returns the height of the latest block
+     /// get_best_height returns the height of the latest block
      pub fn get_best_height(&self) -> Result<i32> {
         let lasthash = if let Some(h) = self.db.get("LAST")? {
             h

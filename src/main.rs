@@ -1,7 +1,5 @@
-//use crate::cli::Cli;
 use crate::errors::Result;
 use eframe::egui;
-//use eframe::egui::IconData;
 use egui::{FontData, FontFamily};
 use egui_extras::install_image_loaders;
 
@@ -9,11 +7,11 @@ mod block;
 mod transaction;
 mod errors;
 mod blockchain;
-mod cli; 
 mod tx;
 mod wallet;
 mod utxoset;
 mod server;
+mod runtime;
 mod app;
 
 fn main() -> eframe::Result {
@@ -30,22 +28,28 @@ fn main() -> eframe::Result {
         ..Default::default()
     };    
 
+    // Initialize the app asynchronously using the global runtime
+    let app = runtime::RUNTIME.block_on(async {
+        match app::MyApp::initialize_async().await {
+            Ok(initialized_app) => initialized_app,
+            Err(e) => {
+                eprintln!("Failed to initialize app asynchronously: {}", e);
+                app::MyApp::default()
+            }
+        }
+    });
+
     eframe::run_native(
         "BlockJain",
         options,
         Box::new(|cc| {
-            // Setup
             setup_fonts(&cc.egui_ctx); // Custom font setup
             install_image_loaders(&cc.egui_ctx);
-            // Create blockchain here and pass to default?
-            // Just follow cli and try shit out.
 
-            Ok(Box::<app::MyApp>::default())
+            Ok(Box::new(app))
         }),
     )
 }
-
-
 
 
 

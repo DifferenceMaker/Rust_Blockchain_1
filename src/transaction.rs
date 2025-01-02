@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use ed25519_dalek::{VerifyingKey, Verifier, SigningKey, Signature, Signer};
-use crypto::{digest::Digest, ripemd160::Ripemd160, sha2::Sha256};
+use crypto::{digest::Digest, sha2::Sha256};
 use failure::format_err;
-use log::{error, info};
+use log::error;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use crate::utxoset::UTXOSet;
@@ -23,7 +24,7 @@ pub struct Transaction {
 
 impl Transaction {
 
-    pub fn new_utxo(wallet: &Wallet, to: &str, amount: i32, utxo: &UTXOSet) -> Result<Transaction> {
+    pub async fn new_utxo(wallet: &Wallet, to: &str, amount: i32, utxo: &Arc<tokio::sync::RwLock<UTXOSet>>) -> Result<Transaction> {
         println!(
             "new UTXO Transaction from: {} to: {}",
             &wallet.get_address(),
@@ -35,7 +36,7 @@ impl Transaction {
         // Raw hash representation for comparison
         let pub_key_hash = Address::decode(&wallet.get_address()).unwrap().body;
 
-        let acc_v = utxo.find_spendable_outputs(&pub_key_hash, amount)?;
+        let acc_v = utxo.read().await.find_spendable_outputs(&pub_key_hash, amount)?;
 
         if acc_v.0 < amount {
             error!("Not Enough balance");
@@ -76,8 +77,7 @@ impl Transaction {
         // Generate the transaction hash
         tx.id = tx.hash()?;
 
-        utxo.blockchain
-            .sign_transacton(&mut tx, &wallet.secret_key)?;
+        utxo.write().await.blockchain.write().await.sign_transacton(&mut tx, &wallet.secret_key)?;
         
         Ok(tx)
     }

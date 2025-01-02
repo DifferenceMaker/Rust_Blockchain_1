@@ -2,6 +2,7 @@ use bitcoincash_addr::Address;
 //use std::process::exit;
 use clap::{arg, Command};
 use std::process::exit;
+use std::sync::{Arc, Mutex};
 use crate::blockchain::Blockchain;
 use crate::errors::Result;
 use crate::server::Server;
@@ -73,17 +74,18 @@ impl Cli {
                 println!("ADDRESS not supply!: usage");
                 exit(1)
             };
-            let bc = Blockchain::new()?;
-            let utxo_set = UTXOSet { blockchain: bc };
-            let server = Server::new(port, address, utxo_set)?;
+            
+            let bc = Arc::new(Mutex::new(Blockchain::new()?));
+            let utxo_set = Arc::new(Mutex::new(UTXOSet::new(Arc::clone(&bc))));
+            let server = Server::new(port, address, Arc::clone(&utxo_set))?;
             server.start_server()?;
         }
 
         if let Some(ref matches) = matches.subcommand_matches("startnode") {
             if let Some(port) = matches.get_one::<String>("PORT") {
-                let bc = Blockchain::new()?;
-                let utxo_set = UTXOSet { blockchain: bc };
-                let server = Server::new(port, "", utxo_set)?;
+                let bc = Arc::new(Mutex::new(Blockchain::new()?));
+                let utxo_set = Arc::new(Mutex::new(UTXOSet::new(Arc::clone(&bc))));
+            let server = Server::new(port, "", Arc::clone(&utxo_set))?;
                 server.start_server()?;
             }
         }
@@ -97,6 +99,7 @@ impl Cli {
             println!("Done! There are {} transactions in the UTXO set.", count);
         }
 
+        // List addresses
         if let Some(_) = matches.subcommand_matches("listaddresses") {
             let ws = Wallets::new()?;
             let addresses = ws.get_all_address();
@@ -106,11 +109,12 @@ impl Cli {
             }
         }
 
+        // Creates blockchain
         if let Some(ref matches) = matches.subcommand_matches("create") {
             if let Some(address) = matches.get_one::<String>("ADDRESS") {
                 let address = String::from(address);
                 let bc = Blockchain::create_blockchain(address.clone())?;
-                let utxo_set = UTXOSet { blockchain: bc };
+                let utxo_set = UTXOSet { blockchain: Arc::new(Mutex::new(bc)) };
                 utxo_set.reindex()?;
                 println!("create blockchain");
             }
@@ -122,7 +126,7 @@ impl Cli {
                 let pub_key_hash = Address::decode(address).unwrap().body;
                 let bc = Blockchain::new()?;
                 //let utxos = bc.find_UTXO(&pub_key_hash);
-                let utxo_set = UTXOSet { blockchain: bc };
+                let utxo_set = UTXOSet { blockchain: Arc::new(Mutex::new(bc)) };
                 let utxos: TXOutputs = utxo_set.find_utxo(&pub_key_hash)?;
 
                 let mut balance = 0;
@@ -190,13 +194,13 @@ fn cmd_print_chain() -> Result<()> {
 
 fn cmd_send(from: &str, to: &str, amount: i32, mine_now: bool) -> Result<()> {
     let bc = Blockchain::new()?;
-    let mut utxo_set = UTXOSet { blockchain: bc };
+    let mut utxo_set = UTXOSet { blockchain: Arc::new(Mutex::new(bc)) };
     let wallets = Wallets::new()?;
     let wallet = wallets.get_wallet(from).unwrap();
     let tx = Transaction::new_utxo(wallet, to, amount, &utxo_set)?;
     if mine_now {
         let cbtx = Transaction::new_coinbase(from.to_string(), String::from("reward!"))?;
-        let new_block = utxo_set.blockchain.mine_block(vec![cbtx, tx])?;
+        let new_block = utxo_set.blockchain.lock().unwrap().mine_block(vec![cbtx, tx])?;
 
         utxo_set.update(&new_block)?;
     } else {
@@ -216,7 +220,7 @@ fn cmd_create_wallet() -> Result<String> {
 
 fn cmd_reindex() -> Result<i32> {
     let bc = Blockchain::new()?;
-    let utxo_set = UTXOSet { blockchain: bc };
+    let utxo_set = UTXOSet { blockchain: Arc::new(Mutex::new(bc)) };
     utxo_set.reindex()?;
     utxo_set.count_transactions()
 }
