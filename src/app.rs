@@ -53,6 +53,9 @@ pub struct MyApp {
 
     // Blockchain Tab
     blocks: Vec<Block>,
+    show_transactions: bool,
+    block_search_query: String,
+    block_search_result: Option<Block>,
 
     // Transaction Tab
     selected_wallet: Option<String>,
@@ -126,6 +129,9 @@ impl MyApp {
 
             // Blockchain Tab
             blocks: current_blocks,
+            show_transactions: false,
+            block_search_query: String::new(),
+            block_search_result: None,
 
             // Transaction Tab
             selected_wallet: None,
@@ -362,6 +368,10 @@ impl Default for MyApp {
 
             // Blockchain Tab
             blocks: Vec::new(),
+            show_transactions: false,
+            block_search_query: String::new(),
+            block_search_result: None,
+
 
             // Transaction Tab
             selected_wallet: None,
@@ -492,71 +502,95 @@ impl eframe::App for MyApp {
 
 // Methods for rendering each section
 impl MyApp {
-    fn render_blockchain_section(&self, ui: &mut egui::Ui) {
-        ui.heading("Blockchain");
-        ui.label("View and analyze the blockchain.");
-
-        /*
-            Add current block height. Current block hash. 
-            Search block?
-
-
-            update so it is horizontally scrollable. 
-            width and height as a block
-            
-        */
+    fn render_blockchain_section(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui|{
+            ui.vertical(|ui|{
+                ui.heading("Blockchain");
+                ui.label("View and analyze the blockchain.");
+            });
     
-        // Create a horizontal scroll area for blocks
-        egui::ScrollArea::vertical()
-            .auto_shrink([true, false]) // Do not shrink horizontally, but shrink vertically
-            .enable_scrolling(true)    // Ensure mouse scrolling is enabled
+            if ui.button("Toggle Transactions").clicked() {
+                self.show_transactions = !self.show_transactions;
+            }
+    
+            ui.label(format!(" Current Height: {}", &self.blocks.first().unwrap().get_height() ));
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Search input
+                ui.horizontal(|ui| {
+                    let placeholder = "Enter Height or Hash"; // Placeholder text
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.block_search_query)
+                            .hint_text(placeholder),
+                    );
+
+                    // Update search result dynamically
+                    if response.changed() {
+                        if self.block_search_query.trim().is_empty() {
+                            self.block_search_result = None;
+                        } else {
+                            self.block_search_result = self
+                                .blocks
+                                .iter()
+                                .find(|block| {
+                                    block.get_height().to_string() == self.block_search_query
+                                        || block.get_hash() == self.block_search_query
+                                })
+                                .cloned();
+                        }
+                    }
+                });
+            });    
+        });
+        ui.add_space(5.0);
+
+        // Scrollable display section
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.vertical(|ui| {
+                match &self.block_search_result {
+                    Some(block) => {
+                        // Render only the searched block
+                        MyApp::render_block(ui, block, self.show_transactions);
+                    }
+                    None => {
+                        // Render all blocks
+                        for block in &self.blocks {
+                            MyApp::render_block(ui, block, self.show_transactions);
+                            ui.add_space(15.0);
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    // Function to render a single block
+    fn render_block(ui: &mut egui::Ui, block: &Block, show_transactions: bool) {
+        egui::Frame::none()
+            .rounding(egui::Rounding::same(5.0))
+            .fill(egui::Color32::from_rgb(30, 30, 30))
+            .inner_margin(egui::Margin::same(10.0))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::WHITE))
             .show(ui, |ui| {
-                ui.vertical(|ui| {
-                    for block in &self.blocks {
+                ui.vertical_centered(|ui| {
+                    ui.label(format!("{}", block.get_height()));
+                    ui.label(format!("Block Hash: {}", block.get_hash()));
+                    ui.label(format!("Previous Hash: {}", block.get_prev_hash()));
+                    ui.label(format!("Timestamp: {}", convert_timestamp(block.get_timestamp())));
+                    ui.label(format!("Nonce: {}", block.get_nonce()));
+
+                    if show_transactions {
+                        ui.add_space(10.0);
                         egui::Frame::none()
                             .rounding(egui::Rounding::same(5.0))
-                            .fill(egui::Color32::from_rgb(30, 30, 30))
+                            .fill(egui::Color32::from_rgb(50, 50, 50))
                             .inner_margin(egui::Margin::same(10.0))
                             .stroke(egui::Stroke::new(1.0, egui::Color32::WHITE))
                             .show(ui, |ui| {
-                                ui.vertical_centered(|ui| {
-                                    ui.label(format!(
-                                        "Block Hash: {}",
-                                        block.get_hash()
-                                    ));
-                                    ui.label(format!(
-                                        "Previous Hash: {}",
-                                        block.get_prev_hash()
-                                    ));
-                                    ui.label(format!(
-                                        "Height: {}",
-                                        block.get_height()
-                                    ));
-                                    ui.label(format!(
-                                        "Timestamp: {}",
-                                        convert_timestamp(block.get_timestamp())
-                                    ));
-                                    ui.label(format!("Nonce: {}", block.get_nonce()));
-    
-                                    let mut show_transactions = false;
-                                    if ui.button("Toggle Transactions").clicked() {
-                                        show_transactions = !show_transactions;
-                                    }
-    
-                                    if show_transactions {
-                                        egui::Frame::none()
-                                            .rounding(egui::Rounding::same(5.0))
-                                            .fill(egui::Color32::from_rgb(50, 50, 50))
-                                            .inner_margin(egui::Margin::same(10.0))
-                                            .stroke(egui::Stroke::new(1.0, egui::Color32::WHITE))
-                                            .show(ui, |ui| {
-                                                ui.label("Transactions:");
-                                                for tx in block.get_transactions() {
-                                                    ui.label(format!("Tx ID: {}", tx.id));
-                                                }
-                                            });
-                                    }
-                                });
+                                ui.label("Transactions:");
+                                for tx in block.get_transactions() {
+                                    ui.label(format!("Tx ID: {}", tx.id));
+                                }
                             });
                     }
                 });
@@ -698,6 +732,8 @@ impl MyApp {
             });
         });
 
+        /* Search transactions by id  */
+        /* Search your transactions? */
     }
 
 
