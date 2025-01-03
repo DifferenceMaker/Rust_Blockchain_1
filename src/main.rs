@@ -2,6 +2,7 @@ use crate::errors::Result;
 use eframe::egui;
 use egui::{FontData, FontFamily};
 use egui_extras::install_image_loaders;
+use crate::settings::SETTINGS;
 
 mod block;
 mod transaction;
@@ -13,20 +14,22 @@ mod utxoset;
 mod server;
 mod runtime;
 mod app;
+mod settings;
 
 fn main() -> eframe::Result {
-    env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
+    env_logger::init();
 
     // Application options
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 600.0])
+            .with_inner_size(egui::vec2(SETTINGS.resolution.0, SETTINGS.resolution.1))
             .with_icon(load_icon("resources/images/icon.png"))
-            .with_min_inner_size([800.0, 400.0])
-            .with_max_inner_size([1200.0, 800.0]),
+            .with_min_inner_size([800.0, 400.0]),
         centered: true,
         ..Default::default()
     };    
+
+    println!("bluh: {}", SETTINGS.bootstrap_node);
 
     // Initialize the app asynchronously using the global runtime
     let app = runtime::RUNTIME.block_on(async {

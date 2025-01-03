@@ -18,7 +18,8 @@ use crate::transaction::Transaction;
 use crate::tx::TXOutputs;
 use crate::utxoset::UTXOSet;
 use crate::wallet::*;
-use crate::runtime::RUNTIME; // Import the global runtime (tokio)
+use crate::runtime::RUNTIME;    // Import the global runtime (tokio)
+use crate::settings::SETTINGS;  // Application Settings
 
 #[derive(Debug, Fail)]
 pub enum WalletImportError {
@@ -54,6 +55,7 @@ pub struct MyApp {
     // Blockchain Tab
     blocks: Vec<Block>,
     show_transactions: bool,
+    blocks_to_display: usize,
     block_search_query: String,
     block_search_result: Option<Block>,
 
@@ -82,6 +84,7 @@ impl MyApp {
              - Use a default port like 8333 for Bitcoin-like blockchains.
              - Interval for blockchain check
              - How many miners to allow
+             - preffered miner address
         */
 
         let mut wallets = Wallets::new()?; 
@@ -102,7 +105,6 @@ impl MyApp {
 
         let mut current_blocks:Vec<Block> = Vec::new();
 
-        // Get nodes blocks
         for block_hash in &blockchain.read().await.get_block_hashes() {
             current_blocks.push( blockchain.read().await.get_block(block_hash)?.clone() );
         }
@@ -130,6 +132,7 @@ impl MyApp {
             // Blockchain Tab
             blocks: current_blocks,
             show_transactions: false,
+            blocks_to_display: 5,
             block_search_query: String::new(),
             block_search_result: None,
 
@@ -369,9 +372,9 @@ impl Default for MyApp {
             // Blockchain Tab
             blocks: Vec::new(),
             show_transactions: false,
+            blocks_to_display: 0,
             block_search_query: String::new(),
             block_search_result: None,
-
 
             // Transaction Tab
             selected_wallet: None,
@@ -392,8 +395,7 @@ impl Default for MyApp {
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-       
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {       
         let bg_color = egui::Color32::from_rgb(30, 30, 30); // Dark gray
         let visuals = egui::Visuals {
             override_text_color: Some(egui::Color32::WHITE), // Optional: Ensure white text
@@ -479,10 +481,7 @@ impl eframe::App for MyApp {
         // Melnraksta Transactions... ; Mempool?
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        /* Double-check that all critical user data is saved (e.g., wallets, settings, blockchain state). */
-        /* Close any open files, terminate threads, or gracefully shut down networking resources. */
-
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
 
         // Saves Wallets on disk
         if let Err(e) = self.wallets.save_all() {
@@ -491,9 +490,9 @@ impl eframe::App for MyApp {
             println!("Wallets successfully saved on exit.");
         }
         
-        // Closes DB for Blockchain
-
-        // Additional clean-up logic
+        // Settings
+        SETTINGS.save("settings.json");
+        
         println!("Application exiting. Cleaning up resources...");
     }
 
@@ -503,6 +502,7 @@ impl eframe::App for MyApp {
 // Methods for rendering each section
 impl MyApp {
     fn render_blockchain_section(&mut self, ui: &mut egui::Ui) {
+
         ui.horizontal(|ui|{
             ui.vertical(|ui|{
                 ui.heading("Blockchain");
@@ -553,10 +553,18 @@ impl MyApp {
                         MyApp::render_block(ui, block, self.show_transactions);
                     }
                     None => {
-                        // Render all blocks
-                        for block in &self.blocks {
+                        for block in self.blocks.iter().take(self.blocks_to_display) {
                             MyApp::render_block(ui, block, self.show_transactions);
                             ui.add_space(15.0);
+                        }
+                    
+                        // Load More button
+                        if self.blocks_to_display < self.blocks.len() {
+                            ui.vertical_centered(|ui| {
+                                if ui.button("Load More Blocks").clicked() {
+                                    self.blocks_to_display += 20; // Increment by 20 blocks
+                                }
+                            });
                         }
                     }
                 }
@@ -568,9 +576,9 @@ impl MyApp {
     fn render_block(ui: &mut egui::Ui, block: &Block, show_transactions: bool) {
         egui::Frame::none()
             .rounding(egui::Rounding::same(5.0))
-            .fill(egui::Color32::from_rgb(30, 30, 30))
+            .fill(egui::Color32::from_rgb(20, 20, 20))
             .inner_margin(egui::Margin::same(10.0))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::WHITE))
+            .stroke(egui::Stroke::new(2.0, egui::Color32::DARK_GRAY))
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.label(format!("{}", block.get_height()));
@@ -598,8 +606,6 @@ impl MyApp {
     }
     
     
-    
-
     fn render_transactions_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("Transactions");
         ui.label("View and create transactions.");
@@ -961,16 +967,9 @@ impl MyApp {
         
     }
 
-    fn render_settings_section(&mut self, _ui: &mut egui::Ui) {
-       
-        /*
-         Theme? 
-         Default-wallet
-
-         advanced settings:
-         server port
-         bootstrap_node
-         */
+    fn render_settings_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Settings");
+        ui.label("Change Your Preferred Settings");
 
 
     }
