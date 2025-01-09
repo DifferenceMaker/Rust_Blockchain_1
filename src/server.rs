@@ -151,6 +151,12 @@ impl Server {
         }
     }
 
+    pub async fn add_peer(&mut self, new_peer:String ) -> Result<()>{
+        let peer_ip = new_peer + ":8334";
+        self.get_known_nodes().await.insert(peer_ip);
+        Ok(())
+    }
+
     // implement shutdown_server
 
     async fn check_and_update_blockchain_state(&self) -> Result<()> {

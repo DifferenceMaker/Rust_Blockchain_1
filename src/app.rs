@@ -1,18 +1,21 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use eframe::egui;
 use egui::Ui;
-use failure::{Error, Fail};
-use crate::block::{self, Block};
-use crate::errors::Result;
-use bitcoincash_addr::{Address, HashType, Scheme};
-use crypto::{digest::Digest, ed25519, ripemd160::Ripemd160, sha2::Sha256};
+use failure::Fail;
+use futures::FutureExt;
+use reqwest;
+use bitcoincash_addr::Address;
+use crypto::ed25519;
 use hex;
 use log::error;
-
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{ oneshot, RwLock };
+use futures::future::poll_fn;
 
+// My Crates
 use crate::blockchain::Blockchain;
+use crate::block::Block;
+use crate::errors::Result;
 use crate::server::Server;
 use crate::transaction::Transaction;
 use crate::tx::TXOutputs;
@@ -32,6 +35,7 @@ enum Tab {
     Blockchain,
     Transactions,
     Wallets,
+    Peers,
     Settings,
 }
 
@@ -42,15 +46,26 @@ struct Notification {
     pub duration: u64,        // Duration in seconds before auto-dismissal
 }
 
-pub struct MyApp {
-    // Blockchain specific
+pub struct BlockchainModule {
     wallets: Wallets,
     balances: Vec<i32>,
     utxo_set: Arc<RwLock<UTXOSet>>,
-    server: Arc<Server>,
+}
 
-    // Tabbing
-    active_tab: Tab, // Track which section is active
+pub struct NetworkModule {
+    public_ip: Option<Result<String>>, // Use the custom Result type here
+    server: Arc<Server>,
+    peer_ip_address_input: String,
+    connected_peers: Vec<String>,
+}
+
+pub struct NotificationModule {
+    notifications: Vec<Notification>,
+    notification_counter: u32,
+}
+
+pub struct UIState {
+    active_tab: Tab, // -
 
     // Blockchain Tab
     blocks: Vec<Block>,
@@ -66,27 +81,52 @@ pub struct MyApp {
     tx_gas_price: i32,
     tx_gas_limit: i32,
 
-    // Notification Tab
-    notifications: Vec<Notification>,
-    notification_counter: u32,
-
     // Popups
     show_delete_popup: Option<String>,
     show_add_existing_wallet_popup: bool,
 }
 
+pub struct MyApp {
+    // Blockchain specific
+    wallets: Wallets, // -
+    balances: Vec<i32>, // -
+    utxo_set: Arc<RwLock<UTXOSet>>, // -
+
+    server: Arc<Server>, // -
+
+    // Tabbing
+    active_tab: Tab, // -
+
+    // Blockchain Tab
+    blocks: Vec<Block>, // -
+    show_transactions: bool, // -
+    blocks_to_display: usize, // -
+    block_search_query: String, // -
+    block_search_result: Option<Block>, // -
+
+    // Transaction Tab
+    selected_wallet: Option<String>, // -
+    receiver_address: String, // -
+    tx_amount: i32, // -
+    tx_gas_price: i32, // -
+    tx_gas_limit: i32, // -
+
+    // Peers Tab
+    public_ip: Option<Result<String>>, // Use the custom Result type here // -
+    peer_ip_address_input: String, // -
+    connected_peers: Vec<String>, // -
+
+    // Notification Tab
+    notifications: Vec<Notification>, // -
+    notification_counter: u32, // -
+
+    // Popups
+    show_delete_popup: Option<String>, // -
+    show_add_existing_wallet_popup: bool, // -
+}
+
 impl MyApp {
     pub async fn initialize_async() -> Result<Self> {
-        // Load Settings to get preferences for node.
-        /*
-             - Regular node vs also miner node
-             - connect node list? 
-             - Use a default port like 8333 for Bitcoin-like blockchains.
-             - Interval for blockchain check
-             - How many miners to allow
-             - preffered miner address
-        */
-
         let mut wallets = Wallets::new()?; 
 
         // Retrieve first wallet and its address. 
@@ -121,9 +161,24 @@ impl MyApp {
             }
         });
 
+         // Fetch Public IP
+        let public_ip_result = get_public_ip()
+            .await
+            .map_err(|e| failure::format_err!("Failed to retrieve public IP: {}", e));
+
+        let public_ip = match public_ip_result {
+            Ok(ip) => Some(Ok(ip)),
+            Err(e) => Some(Err(e)),
+        };
+        
+        let mut balances: Vec<i32> = Vec::new();
+
+        
+        MyApp::update_balances(&wallets, Arc::clone(&utxo_set), &mut balances).await?;
+
         let mut app = MyApp {
             wallets,
-            balances: Vec::new(),
+            balances: balances,
             utxo_set: Arc::clone(&utxo_set),
             // pass an arc-clone to MyApp struct to have availability to the network
             server: Arc::clone(&server),
@@ -145,7 +200,12 @@ impl MyApp {
 
             // Wallets Tab
             show_delete_popup: None,
-            show_add_existing_wallet_popup: false,
+            show_add_existing_wallet_popup: false, 
+
+            // Peers Tab
+            public_ip: public_ip,
+            peer_ip_address_input: String::new(),
+            connected_peers: Vec::new(),
 
             // Notification Tab
             notifications: Vec::new(),
@@ -153,21 +213,25 @@ impl MyApp {
         };
     
         // Update balances once during initialization
-        app.update_balances().await?;
+
         Ok(app)
     }
 
     /// Updates the balances vector based on the current UTXO set.
-    pub async fn update_balances(&mut self) -> Result<()> {
+    /// REMEMBER TO CALL .await SO IT EXECUTES.
+    pub async fn update_balances(wallets: &Wallets, utxo_set: Arc<RwLock<UTXOSet>>, balances: &mut Vec<i32>) -> Result<()> {
         let mut new_balances = Vec::new();
 
-        for address in self.wallets.get_all_address() {
+        // self.wallets - reads
+        // self.utxo_set - reads
+        // self.balances - updates
+        
+        for address in wallets.get_all_address() {
             
             let pub_key_hash = Address::decode(&address).unwrap().body;
-            //println!("address: {}, pub_key_hash: {:?}", &address, &pub_key_hash);
 
             // Find all UTXOs for this address
-            let utxos: TXOutputs = self.utxo_set.read().await.find_utxo(&pub_key_hash).unwrap_or_else(|_| {
+            let utxos: TXOutputs = utxo_set.read().await.find_utxo(&pub_key_hash).unwrap_or_else(|_| {
                 TXOutputs {
                     outputs: vec![],
                 }
@@ -175,13 +239,16 @@ impl MyApp {
 
             // Calculate the total balance for this address
             let balance: i32 = utxos.outputs.iter().map(|out| out.value).sum();
+            
+            println!("address: {}, balance: {}", &address, &balance);
 
             // Add the balance to the vector
             new_balances.push(balance);
         }
 
         // Update the balances in the app state
-        self.balances = new_balances;
+        *balances = new_balances;
+        println!("Balances updated!");
         Ok(())
     }
 
@@ -210,7 +277,14 @@ impl MyApp {
             self.balances.remove(index);
         }
 
-        let _ = self.update_balances();
+/*/        let wallets_ref = self.wallets;
+        let utxo_set_ref = Arc::clone(&self.utxo_set);
+        let balances_ref = &mut self.balances;
+        RUNTIME.spawn(async move {
+            
+            //let _ = update_balances(wallets_ref, utxo_set_ref, balances_ref).await.unwrap();
+        });*/
+
         Ok(())
     }
 
@@ -223,8 +297,10 @@ impl MyApp {
 
         let serialized_wallet = bincode::serialize(wallet)?;
         file.write_all(&serialized_wallet)?;
+        
+        let msg = String::from(format!("Wallet exported to file: {}", file_name));
+        println!("{}", msg);
 
-        println!("Wallet exported to file: {}", file_name);
         Ok(())
     }
 
@@ -350,6 +426,20 @@ impl MyApp {
         self.notification_counter
     }
 
+
+    fn add_peer(&mut self, new_peer: String) -> Result<()> {
+        println!("Added peer: {}", new_peer);
+
+
+        
+        /*
+            What's the amount of maximum nodes?
+            put in settings max_peers_count
+         */
+        //self.server.add_peer(new_peer);
+
+        Ok(())
+    }
 }
 
 impl Default for MyApp {
@@ -386,6 +476,11 @@ impl Default for MyApp {
             // Wallets Tab
             show_delete_popup: None,
             show_add_existing_wallet_popup: false,
+
+            // Peers Tab
+            public_ip: None,
+            peer_ip_address_input: String::new(),
+            connected_peers: Vec::new(),
 
             // Notification Tab
             notifications: Vec::new(),
@@ -425,11 +520,13 @@ impl eframe::App for MyApp {
                 if ui.button(egui::RichText::new("Wallets").size(16.0)).clicked() {
                     self.active_tab = Tab::Wallets;
                 }
+                if ui.button(egui::RichText::new("Peers").size(16.0)).clicked() {
+                    self.active_tab = Tab::Peers;
+                }
                 if ui.button(egui::RichText::new("Settings").size(16.0)).clicked() {
                     self.active_tab = Tab::Settings;
                 }
 
-                                // Spacer to push the following content to the rightmost side
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let wallet_count = self.wallets.get_all_address().len();
                     
@@ -442,19 +539,14 @@ impl eframe::App for MyApp {
                     ui.add_space(10.0);
                     if ui.add(
                             egui::Label::new(egui::RichText::new(text))
-                                .sense(egui::Sense::click()), // Make it interactive
-                                        
+                                .sense(egui::Sense::click()), // Make it interactive          
                         )
                         .on_hover_text("Go to Wallets tab") // Optional tooltip
                         .on_hover_cursor(egui::CursorIcon::PointingHand) // Change cursor to pointer
                         .clicked(){
                             self.active_tab = Tab::Wallets;
                         };
-
-                    
                 });
-            
-            
             });
 
             // Section rendering based on the active tab
@@ -464,15 +556,13 @@ impl eframe::App for MyApp {
                 Tab::Blockchain => self.render_blockchain_section(ui),
                 Tab::Transactions => self.render_transactions_section(ui),
                 Tab::Wallets => self.render_wallets_section(ui),
+                Tab::Peers => self.render_peers_section(ui),
                 Tab::Settings => self.render_settings_section(ui),
             }
 
             self.render_notifications(ctx);
 
-        });
-    
-        
-    
+        }); 
     }
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) { // automatically every 30 seconds
@@ -482,7 +572,6 @@ impl eframe::App for MyApp {
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
-
         // Saves Wallets on disk
         if let Err(e) = self.wallets.save_all() {
             eprintln!("Failed to save wallets on exit: {}", e);
@@ -605,7 +694,6 @@ impl MyApp {
             });
     }
     
-    
     fn render_transactions_section(&mut self, ui: &mut egui::Ui) {
         ui.heading("Transactions");
         ui.label("View and create transactions.");
@@ -643,7 +731,6 @@ impl MyApp {
                             }
                         }
                     });
-
             });
             
             if let Some(wlt_address) = &self.selected_wallet {
@@ -756,17 +843,38 @@ impl MyApp {
                 egui::Label::new(egui::RichText::new(format!("Total Balance: {}", &total_balance)))            
             );
                 
-
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+
                 if ui.button("Create New Wallet").clicked() {
                     let new_address = self.wallets.create_wallet();
-                    println!("new wallet address: {}", new_address);
+                    println!("New wallet address: {}", new_address);
 
                     if let Err(err) = self.wallets.save_all() {
                         println!("Error saving wallet: {}", err);
-                    }                    
+                    }
 
-                    let _ = self.update_balances();
+                    // self.refractor_balances(); - ?
+
+                    let wallets = self.wallets.clone(); // Assume `Wallets` is clonable
+                    let utxo_set = Arc::clone(&self.utxo_set);
+                    let balances = Arc::new(RwLock::new(self.balances.clone())); // Use Arc<Mutex> for safe shared mutation
+
+                    RUNTIME.spawn({
+                        let balances_clone = Arc::clone(&balances);
+
+                        async move {
+                            let mut balances_lock = balances_clone.write().await; // Lock the mutex for modification
+                            if let Err(err) = MyApp::update_balances(&wallets, utxo_set, &mut *balances_lock).await {
+                                println!("Error updating balances: {}", err);
+                            } else {
+                                println!("Balances successfully updated!");
+                            }
+                        }
+                        
+                    });
+
+
+
                     self.add_notification("New wallet created successfully.".to_string());
 
                 }
@@ -775,6 +883,10 @@ impl MyApp {
         
                 if ui.button("Add Existing Wallet").clicked() {
                     self.show_add_existing_wallet_popup = true;                    
+                }
+
+                if ui.button("Refresh Balances").clicked(){
+                    //let _ = self.update_balances();
                 }
             });
         });
@@ -837,6 +949,8 @@ impl MyApp {
 
                             // Right side buttons
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                
+                                // Delete Wallet
                                 ui.scope(|ui|{
                                     ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(194, 42, 25);
                                     ui.style_mut().visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(194, 42, 25);
@@ -848,6 +962,7 @@ impl MyApp {
                                     }
                                 });
                                     
+                                // Export Wallet
                                 if ui.button("Export Wallet").clicked() {
                                     if let Some(wallet) = self.wallets.get_wallet(address) {
                                         if let Err(err) = self.export_wallet_to_file(address, wallet) {
@@ -856,6 +971,7 @@ impl MyApp {
                                     }
                                 }
 
+                                // Send Wallet
                                 if ui.button("Send").clicked() {
                                     println!("Send button clicked for wallet: {}", address);
                                     
@@ -863,10 +979,11 @@ impl MyApp {
 
                                     self.selected_wallet = Some(address.clone());
                                 }
+
+                                // Receive - doesn't do anything
                                 if ui.button("Receive").clicked() {
                                     println!("Receive button clicked for wallet: {}", address);
                                 }
-                                
                                 
                             });
                         });
@@ -951,20 +1068,72 @@ impl MyApp {
                 ui.text_edit_singleline(&mut secret_key_input);
 
                 // Provide a button to submit the secret key
-                if ui.button("Retrieve Wallet").clicked() {
-                    if let Ok(wallet) = self.import_wallet_from_key(&secret_key_input) {
-                        self.wallets.insert(&wallet.get_address(), wallet);
-                        println!("Wallet retrieved from private key");
-
-                        self.show_add_existing_wallet_popup = false;
-                    } else {
-                        println!("Failed to retrieve wallet from the provided key");
+                ui.horizontal(|ui|{
+                    if ui.button("Retrieve Wallet").clicked() {
+                        if let Ok(wallet) = self.import_wallet_from_key(&secret_key_input) {
+                            self.wallets.insert(&wallet.get_address(), wallet);
+                            println!("Wallet retrieved from private key");
+    
+                            self.show_add_existing_wallet_popup = false;
+                        } else {
+                            println!("Failed to retrieve wallet from the provided key");
+                        }
                     }
-                }
+                    if ui.button("Cancel").clicked(){
+                        self.show_add_existing_wallet_popup = false;
+                    }
+                });
             });
         }
 
         
+    }
+
+    fn render_peers_section(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Peers");
+        ui.horizontal(|ui| {
+            ui.label("View And Manage Your Peers");
+
+            ui.add_space(10.0);
+            ui.label(format!("Peer Count: {}", 5));
+        });
+
+        ui.separator();
+
+        match &self.public_ip {
+            Some( Ok(ip) ) => {
+                ui.label(format!("Your Public IP: {}", ip));
+            },
+            Some(Err(_)) => {
+                ui.label(format!("Couldn't retrieve your Public IP"));
+            },
+            None => {
+                ui.label("Wait...");
+            }
+        }
+
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.peer_ip_address_input)
+                .hint_text("Input Peer's IP Address"));
+
+
+            if ui.button("Add Peer").clicked() {
+                if !self.peer_ip_address_input.is_empty() {
+                    let _ = self.add_peer(self.peer_ip_address_input.clone());
+                    self.peer_ip_address_input.clear();
+                }
+            }
+        });
+
+        // Display the list of connected peers
+        ui.label("Connected Peers:");
+        for peer in &self.connected_peers {
+            ui.label(peer);
+        }
+        // display connected peers - ip address, node type, Functionality (disconnect from peering, )
+
+        
+
     }
 
     fn render_settings_section(&mut self, ui: &mut egui::Ui) {
@@ -1057,4 +1226,9 @@ fn convert_timestamp(timestamp: u128) -> String {
     // Convert NaiveDateTime to DateTime<Utc>
     let datetime: DateTime<Utc> = DateTime::from_utc(naive_datetime, Utc);
     datetime.format("%d-%m-%Y %H:%M:%S").to_string()
+}
+
+async fn get_public_ip() -> Result<String> {
+    let response = reqwest::get("https://ipinfo.io/ip").await?.text().await?;
+    Ok(response)
 }

@@ -15,12 +15,12 @@ pub struct Settings {
     pub fullscreen: bool,
     pub resolution: (f32, f32),
     pub default_wallet: String,
+    pub max_blocks_loaded: usize,
+
+    // Node Settings
     pub node_type: NodeType,
     pub blockchain_state_check_interval: u64,
     pub preferred_miner_address: String,
-    pub max_blocks_loaded: usize,
-
-    // Advanced Settings
     pub server_port: String,    // [PORT]
     pub bootstrap_node: String, // 198.2.2.5:[PORT]
 }
@@ -28,15 +28,16 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            // Application Settings
             fullscreen: false,
             resolution: (1000.0, 600.0),
             default_wallet: String::new(),
-            node_type: NodeType::Regular,
-            blockchain_state_check_interval: 20,
-            preferred_miner_address: String::new(),
             max_blocks_loaded: 50,
 
-            // Advanced Settings
+            // Node Settings
+            node_type: NodeType::Regular,
+            preferred_miner_address: String::new(),
+            blockchain_state_check_interval: 20,
             server_port: String::from("8334"),
             bootstrap_node: String::from("127.0.0.1:8335"),
         }

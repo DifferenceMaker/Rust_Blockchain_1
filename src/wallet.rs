@@ -7,7 +7,6 @@ use ed25519_dalek::SigningKey;
 
 use rand::rngs::OsRng;
 use serde::{Serialize, Deserialize};
-use log::info;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Wallet {
@@ -69,6 +68,7 @@ impl Wallet {
     }
 }
 
+#[derive(Clone)]
 pub struct Wallets {
     // address, Wallet
     wallets: HashMap<String, Wallet>,
@@ -115,7 +115,7 @@ impl Wallets {
         let wallet = Wallet::new();
         let address = wallet.get_address();
         self.wallets.insert(address.clone(), wallet);
-        info!("Create wallet: {}", address);
+        println!("Create wallet: {}", address);
         address
     }
 

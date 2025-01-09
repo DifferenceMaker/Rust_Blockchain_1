@@ -29,8 +29,6 @@ fn main() -> eframe::Result {
         ..Default::default()
     };    
 
-    println!("bluh: {}", SETTINGS.bootstrap_node);
-
     // Initialize the app asynchronously using the global runtime
     let app = runtime::RUNTIME.block_on(async {
         match app::MyApp::initialize_async().await {
