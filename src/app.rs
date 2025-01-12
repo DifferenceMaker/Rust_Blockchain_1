@@ -2,15 +2,13 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use eframe::egui;
 use egui::Ui;
 use failure::Fail;
-use futures::FutureExt;
 use reqwest;
 use bitcoincash_addr::Address;
 use crypto::ed25519;
 use hex;
 use log::error;
 use std::sync::Arc;
-use tokio::sync::{ oneshot, RwLock };
-use futures::future::poll_fn;
+use tokio::sync::{ oneshot, RwLock, mpsc };
 
 // My Crates
 use crate::blockchain::Blockchain;
@@ -46,6 +44,12 @@ struct Notification {
     pub duration: u64,        // Duration in seconds before auto-dismissal
 }
 
+#[derive(Debug)]
+pub enum TaskMessage {
+    BalancesUpdated(Vec<i32>),
+    Error(String),
+}
+
 pub struct BlockchainModule {
     wallets: Wallets,
     balances: Vec<i32>,
@@ -55,8 +59,6 @@ pub struct BlockchainModule {
 pub struct NetworkModule {
     public_ip: Option<Result<String>>, // Use the custom Result type here
     server: Arc<Server>,
-    peer_ip_address_input: String,
-    connected_peers: Vec<String>,
 }
 
 pub struct NotificationModule {
@@ -81,53 +83,33 @@ pub struct UIState {
     tx_gas_price: i32,
     tx_gas_limit: i32,
 
-    // Popups
+    // Wallet Tab
     show_delete_popup: Option<String>,
     show_add_existing_wallet_popup: bool,
+
+    // Peers Tab
+    peer_ip_address_input: String,
+    connected_peers_displayed: Vec<String>,
 }
 
 pub struct MyApp {
-    // Blockchain specific
-    wallets: Wallets, // -
-    balances: Vec<i32>, // -
-    utxo_set: Arc<RwLock<UTXOSet>>, // -
+    bc_module: BlockchainModule,
+    net_module: NetworkModule,
+    ui_state: UIState,
 
-    server: Arc<Server>, // -
+    sender: mpsc::Sender<TaskMessage>,
+    receiver: mpsc::Receiver<TaskMessage>,
+    
+    // the popups basically
+    notif_module: NotificationModule,
 
-    // Tabbing
-    active_tab: Tab, // -
-
-    // Blockchain Tab
-    blocks: Vec<Block>, // -
-    show_transactions: bool, // -
-    blocks_to_display: usize, // -
-    block_search_query: String, // -
-    block_search_result: Option<Block>, // -
-
-    // Transaction Tab
-    selected_wallet: Option<String>, // -
-    receiver_address: String, // -
-    tx_amount: i32, // -
-    tx_gas_price: i32, // -
-    tx_gas_limit: i32, // -
-
-    // Peers Tab
-    public_ip: Option<Result<String>>, // Use the custom Result type here // -
-    peer_ip_address_input: String, // -
-    connected_peers: Vec<String>, // -
-
-    // Notification Tab
-    notifications: Vec<Notification>, // -
-    notification_counter: u32, // -
-
-    // Popups
-    show_delete_popup: Option<String>, // -
-    show_add_existing_wallet_popup: bool, // -
 }
 
 impl MyApp {
     pub async fn initialize_async() -> Result<Self> {
         let mut wallets = Wallets::new()?; 
+
+        let (sender, receiver) = mpsc::channel(100);
 
         // Retrieve first wallet and its address. 
         let mining_address =  wallets.get_all_address().get(0).cloned().unwrap_or_default();
@@ -174,15 +156,22 @@ impl MyApp {
         let mut balances: Vec<i32> = Vec::new();
 
         
-        MyApp::update_balances(&wallets, Arc::clone(&utxo_set), &mut balances).await?;
+        let new_balances = MyApp::calculate_new_balances(&wallets, Arc::clone(&utxo_set)).await?;
+        let _ = sender.send(TaskMessage::BalancesUpdated(new_balances)).await;
 
-        let mut app = MyApp {
-            wallets,
+        let blockchain_module = BlockchainModule {
+            wallets: wallets,
             balances: balances,
             utxo_set: Arc::clone(&utxo_set),
-            // pass an arc-clone to MyApp struct to have availability to the network
+        };
+
+        let network_module = NetworkModule {
+            public_ip: public_ip, // Use the custom Result type here
             server: Arc::clone(&server),
-            active_tab: Tab::Blockchain,
+        };
+
+        let ui_state = UIState {
+            active_tab: Tab::Blockchain, // -
 
             // Blockchain Tab
             blocks: current_blocks,
@@ -203,13 +192,24 @@ impl MyApp {
             show_add_existing_wallet_popup: false, 
 
             // Peers Tab
-            public_ip: public_ip,
             peer_ip_address_input: String::new(),
-            connected_peers: Vec::new(),
-
+            connected_peers_displayed: Vec::new(),
+        };
+        
+        let notification_module = NotificationModule {
             // Notification Tab
             notifications: Vec::new(),
             notification_counter: 0,
+        };
+
+        let app = MyApp {
+            bc_module: blockchain_module,
+            net_module: network_module,
+            ui_state: ui_state,
+            notif_module: notification_module,
+
+            sender: sender,
+            receiver: receiver,
         };
     
         // Update balances once during initialization
@@ -217,17 +217,11 @@ impl MyApp {
         Ok(app)
     }
 
-    /// Updates the balances vector based on the current UTXO set.
-    /// REMEMBER TO CALL .await SO IT EXECUTES.
-    pub async fn update_balances(wallets: &Wallets, utxo_set: Arc<RwLock<UTXOSet>>, balances: &mut Vec<i32>) -> Result<()> {
+    // calculates and returns new balances (vector of i32)
+    pub async fn calculate_new_balances(wallets: &Wallets, utxo_set: Arc<RwLock<UTXOSet>>) -> Result<Vec<i32>> {
         let mut new_balances = Vec::new();
-
-        // self.wallets - reads
-        // self.utxo_set - reads
-        // self.balances - updates
         
-        for address in wallets.get_all_address() {
-            
+        for address in wallets.get_all_address() {            
             let pub_key_hash = Address::decode(&address).unwrap().body;
 
             // Find all UTXOs for this address
@@ -247,43 +241,53 @@ impl MyApp {
         }
 
         // Update the balances in the app state
-        *balances = new_balances;
         println!("Balances updated!");
-        Ok(())
+        Ok(new_balances)
     }
 
     /// Retrieves the balance for a given wallet address.
     /// Returns `None` if the address is not found in the wallets list.
     pub fn get_balance(&self, address: &str) -> Option<i32> {
-        if let Some(index) = self.wallets.get_all_address().iter().position(|a| a == address) {
-            self.balances.get(index).copied()
+        if let Some(index) = self.bc_module.wallets.get_all_address().iter().position(|a| a == address) {
+            self.bc_module.balances.get(index).copied()
         } else {
             None
         }
     }
 
     pub fn total_balance(&self) -> i32 {
-        self.balances.iter().sum()
+        self.bc_module.balances.iter().sum()
     }
 
     pub fn delete_wallet(&mut self, address: &str) -> Result<()> {
-        self.wallets.delete_wallet(address)?;
+        self.bc_module.wallets.delete_wallet(address)?;
 
         let message = format!("Wallet Deleted (Address): {}", &address);
         self.add_notification(message);
 
         // Update balances: Assuming balances align with wallet order
-        if let Some(index) = self.wallets.get_all_address().iter().position(|a| a == address) {
-            self.balances.remove(index);
+        if let Some(index) = self.bc_module.wallets.get_all_address().iter().position(|a| a == address) {
+            self.bc_module.balances.remove(index);
         }
 
-/*/        let wallets_ref = self.wallets;
-        let utxo_set_ref = Arc::clone(&self.utxo_set);
-        let balances_ref = &mut self.balances;
+        let wallets = self.bc_module.wallets.clone(); // contains the new wallet
+        let utxo_set = Arc::clone(&self.bc_module.utxo_set);
+        let sender = self.sender.clone();
+
         RUNTIME.spawn(async move {
-            
-            //let _ = update_balances(wallets_ref, utxo_set_ref, balances_ref).await.unwrap();
-        });*/
+            match MyApp::calculate_new_balances(&wallets, utxo_set).await {
+                Ok(new_balances) => {
+                    sender.send(TaskMessage::BalancesUpdated(new_balances))
+                        .await
+                        .unwrap_or_else(|e| println!("Failed to send balances: {}", e));
+                }
+                Err(err) => {
+                    sender.send(TaskMessage::Error(err.to_string()))
+                        .await
+                        .unwrap_or_else(|e| println!("Failed to send error: {}", e));
+                }
+            }
+        });
 
         Ok(())
     }
@@ -328,6 +332,7 @@ impl MyApp {
 
     fn valid_tx_fields(&self) -> Result<(String, Wallet, String, i32)> {
         let selected_wallet_name = self
+            .ui_state
             .selected_wallet
             .as_ref()
             .ok_or_else(|| failure::err_msg("No wallet selected"))?
@@ -336,27 +341,28 @@ impl MyApp {
         println!("From: {}", selected_wallet_name);
     
         let wallet = self
+            .bc_module
             .wallets
             .get_wallet(&selected_wallet_name)
             .ok_or_else(|| failure::err_msg("Wallet not found for the selected address"))?;
     
-        if self.receiver_address.is_empty() {
+        if self.ui_state.receiver_address.is_empty() {
             return Err(failure::err_msg("Receiver address cannot be empty"));
         }
     
-        println!("To: {}", self.receiver_address);
+        println!("To: {}", self.ui_state.receiver_address);
     
-        if self.tx_amount <= 0 {
+        if self.ui_state.tx_amount <= 0 {
             return Err(failure::err_msg("Transaction amount must be greater than zero"));
         }
     
-        println!("Amount: {}", self.tx_amount);
+        println!("Amount: {}", self.ui_state.tx_amount);
     
         Ok((
             selected_wallet_name,
             wallet.clone(),
-            self.receiver_address.clone(),
-            self.tx_amount,
+            self.ui_state.receiver_address.clone(),
+            self.ui_state.tx_amount,
         ))
     }
 
@@ -403,11 +409,11 @@ impl MyApp {
 
     fn clear_transaction_form(&mut self){
         // Transaction Tab
-        self.selected_wallet = None;
-        self.receiver_address = String::from("");
-        self.tx_amount = 0;
-        self.tx_gas_price = 0;
-        self.tx_gas_limit = 0;
+        self.ui_state.selected_wallet = None;
+        self.ui_state.receiver_address = String::from("");
+        self.ui_state.tx_amount = 0;
+        self.ui_state.tx_gas_price = 0;
+        self.ui_state.tx_gas_limit = 0;
     }
 
     pub fn add_notification(&mut self, message: String) {
@@ -418,12 +424,12 @@ impl MyApp {
             duration: 10, // 10 seconds
         };
 
-        self.notifications.push(notification);
+        self.notif_module.notifications.push(notification);
     }
 
     fn generate_notification_id(&mut self) -> u32 {
-        self.notification_counter += 1;
-        self.notification_counter
+        self.notif_module.notification_counter += 1;
+        self.notif_module.notification_counter
     }
 
 
@@ -444,6 +450,8 @@ impl MyApp {
 
 impl Default for MyApp {
     fn default() -> Self {
+        let (sender, receiver) = mpsc::channel(100);        
+        
         // Create the `utxo_set` first, since it is needed by `server`
         let utxo_set = Arc::new(RwLock::new(UTXOSet {
             blockchain: Arc::new(RwLock::new(Blockchain::default_empty())),
@@ -452,39 +460,53 @@ impl Default for MyApp {
         // Use `utxo_set` to create the `server`
         let server:Arc<Server> = Arc::new(Server::new("8334", "", Arc::clone(&utxo_set)).unwrap());
 
+        
         Self {
-            wallets: Wallets::default(),
-            balances: Vec::new(),
-            utxo_set: utxo_set,
-            server: server,
-            active_tab: Tab::Blockchain,
+            bc_module: BlockchainModule {
+                wallets: Wallets::default(),
+                balances: Vec::new(),
+                utxo_set: utxo_set,
+            },
+    
+            net_module: NetworkModule {
+                public_ip: None,
+                server: server,
+            },
+    
+            ui_state: UIState {
+                active_tab: Tab::Blockchain,
+    
+                // Blockchain Tab
+                blocks: Vec::new(),
+                show_transactions: false,
+                blocks_to_display: 5,
+                block_search_query: String::new(),
+                block_search_result: None,
+    
+                // Transaction Tab
+                selected_wallet: None,
+                receiver_address: String::from(""),
+                tx_amount: 0,
+                tx_gas_price: 0,
+                tx_gas_limit: 0,
+    
+                // Wallets Tab
+                show_delete_popup: None,
+                show_add_existing_wallet_popup: false, 
 
-            // Blockchain Tab
-            blocks: Vec::new(),
-            show_transactions: false,
-            blocks_to_display: 0,
-            block_search_query: String::new(),
-            block_search_result: None,
+                // Peers Tab
+                peer_ip_address_input: String::new(),
+                connected_peers_displayed: Vec::new(),
+            },
+            
+            notif_module: NotificationModule {
+                // Notification Tab
+                notifications: Vec::new(),
+                notification_counter: 0,
+            },
 
-            // Transaction Tab
-            selected_wallet: None,
-            receiver_address: String::new(),
-            tx_amount: 0,
-            tx_gas_price: 0,
-            tx_gas_limit: 0,
-
-            // Wallets Tab
-            show_delete_popup: None,
-            show_add_existing_wallet_popup: false,
-
-            // Peers Tab
-            public_ip: None,
-            peer_ip_address_input: String::new(),
-            connected_peers: Vec::new(),
-
-            // Notification Tab
-            notifications: Vec::new(),
-            notification_counter: 0,
+            sender: sender,
+            receiver: receiver,
         }
     }
 }
@@ -509,26 +531,27 @@ impl eframe::App for MyApp {
 
         // Render the UI
         egui::CentralPanel::default().show(ctx, |ui| {
+            
             // Navigation bar at the top
             ui.horizontal(|ui| {
                 if ui.button(egui::RichText::new("Blockchain").size(16.0)).clicked() {
-                    self.active_tab = Tab::Blockchain;
+                    self.ui_state.active_tab = Tab::Blockchain;
                 }
                 if ui.button(egui::RichText::new("Transactions").size(16.0)).clicked() {
-                    self.active_tab = Tab::Transactions;
+                    self.ui_state.active_tab = Tab::Transactions;
                 }
                 if ui.button(egui::RichText::new("Wallets").size(16.0)).clicked() {
-                    self.active_tab = Tab::Wallets;
+                    self.ui_state.active_tab = Tab::Wallets;
                 }
                 if ui.button(egui::RichText::new("Peers").size(16.0)).clicked() {
-                    self.active_tab = Tab::Peers;
+                    self.ui_state.active_tab = Tab::Peers;
                 }
                 if ui.button(egui::RichText::new("Settings").size(16.0)).clicked() {
-                    self.active_tab = Tab::Settings;
+                    self.ui_state.active_tab = Tab::Settings;
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let wallet_count = self.wallets.get_all_address().len();
+                    let wallet_count = self.bc_module.wallets.get_all_address().len();
                     
                     let text = if wallet_count > 0 {
                         format!("Connected Wallets: {}", wallet_count)
@@ -544,7 +567,7 @@ impl eframe::App for MyApp {
                         .on_hover_text("Go to Wallets tab") // Optional tooltip
                         .on_hover_cursor(egui::CursorIcon::PointingHand) // Change cursor to pointer
                         .clicked(){
-                            self.active_tab = Tab::Wallets;
+                            self.ui_state.active_tab = Tab::Wallets;
                         };
                 });
             });
@@ -552,7 +575,7 @@ impl eframe::App for MyApp {
             // Section rendering based on the active tab
             ui.separator(); // Add a visual separator
 
-            match self.active_tab {
+            match self.ui_state.active_tab {
                 Tab::Blockchain => self.render_blockchain_section(ui),
                 Tab::Transactions => self.render_transactions_section(ui),
                 Tab::Wallets => self.render_wallets_section(ui),
@@ -560,6 +583,10 @@ impl eframe::App for MyApp {
                 Tab::Settings => self.render_settings_section(ui),
             }
 
+            // Channel message rendering
+            self.render_channel_messages(ctx);
+
+            // Notification rendering
             self.render_notifications(ctx);
 
         }); 
@@ -571,9 +598,9 @@ impl eframe::App for MyApp {
         // Melnraksta Transactions... ; Mempool?
     }
 
-    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Saves Wallets on disk
-        if let Err(e) = self.wallets.save_all() {
+        if let Err(e) = self.bc_module.wallets.save_all() {
             eprintln!("Failed to save wallets on exit: {}", e);
         } else {
             println!("Wallets successfully saved on exit.");
@@ -599,31 +626,31 @@ impl MyApp {
             });
     
             if ui.button("Toggle Transactions").clicked() {
-                self.show_transactions = !self.show_transactions;
+                self.ui_state.show_transactions = !self.ui_state.show_transactions;
             }
     
-            ui.label(format!(" Current Height: {}", &self.blocks.first().unwrap().get_height() ));
+            ui.label(format!(" Current Height: {}", &self.ui_state.blocks.first().unwrap().get_height() ));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Search input
                 ui.horizontal(|ui| {
                     let placeholder = "Enter Height or Hash"; // Placeholder text
                     let response = ui.add(
-                        egui::TextEdit::singleline(&mut self.block_search_query)
+                        egui::TextEdit::singleline(&mut self.ui_state.block_search_query)
                             .hint_text(placeholder),
                     );
 
                     // Update search result dynamically
                     if response.changed() {
-                        if self.block_search_query.trim().is_empty() {
-                            self.block_search_result = None;
+                        if self.ui_state.block_search_query.trim().is_empty() {
+                            self.ui_state.block_search_result = None;
                         } else {
-                            self.block_search_result = self
-                                .blocks
+                            self.ui_state.block_search_result = self
+                                .ui_state.blocks
                                 .iter()
                                 .find(|block| {
-                                    block.get_height().to_string() == self.block_search_query
-                                        || block.get_hash() == self.block_search_query
+                                    block.get_height().to_string() == self.ui_state.block_search_query
+                                        || block.get_hash() == self.ui_state.block_search_query
                                 })
                                 .cloned();
                         }
@@ -636,22 +663,22 @@ impl MyApp {
         // Scrollable display section
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.vertical(|ui| {
-                match &self.block_search_result {
+                match &self.ui_state.block_search_result {
                     Some(block) => {
                         // Render only the searched block
-                        MyApp::render_block(ui, block, self.show_transactions);
+                        MyApp::render_block(ui, block, self.ui_state.show_transactions);
                     }
                     None => {
-                        for block in self.blocks.iter().take(self.blocks_to_display) {
-                            MyApp::render_block(ui, block, self.show_transactions);
+                        for block in self.ui_state.blocks.iter().take(self.ui_state.blocks_to_display) {
+                            MyApp::render_block(ui, block, self.ui_state.show_transactions);
                             ui.add_space(15.0);
                         }
                     
                         // Load More button
-                        if self.blocks_to_display < self.blocks.len() {
+                        if self.ui_state.blocks_to_display < self.ui_state.blocks.len() {
                             ui.vertical_centered(|ui| {
                                 if ui.button("Load More Blocks").clicked() {
-                                    self.blocks_to_display += 20; // Increment by 20 blocks
+                                    self.ui_state.blocks_to_display += 20; // Increment by 20 blocks
                                 }
                             });
                         }
@@ -675,6 +702,8 @@ impl MyApp {
                     ui.label(format!("Previous Hash: {}", block.get_prev_hash()));
                     ui.label(format!("Timestamp: {}", convert_timestamp(block.get_timestamp())));
                     ui.label(format!("Nonce: {}", block.get_nonce()));
+
+                    
 
                     if show_transactions {
                         ui.add_space(10.0);
@@ -712,6 +741,7 @@ impl MyApp {
             
                 // Borrow the wallets before the closure to avoid borrowing `self` inside
                 let wallet_entries: Vec<(String, String)> = self
+                    .bc_module
                     .wallets
                     .iter()
                     .map(|(address, _wallet)| {                        
@@ -723,17 +753,17 @@ impl MyApp {
             
                 // Use the collected data in the dropdown
                 egui::ComboBox::from_label("")
-                    .selected_text(self.selected_wallet.clone().unwrap_or("Select Wallet".into()))
+                    .selected_text(self.ui_state.selected_wallet.clone().unwrap_or("Select Wallet".into()))
                     .show_ui(ui, |ui| {
                         for (address, display_text) in wallet_entries {
-                            if ui.selectable_value(&mut self.selected_wallet, Some(address.clone()), display_text).clicked() {
-                                self.selected_wallet = Some(address);
+                            if ui.selectable_value(&mut self.ui_state.selected_wallet, Some(address.clone()), display_text).clicked() {
+                                self.ui_state.selected_wallet = Some(address);
                             }
                         }
                     });
             });
             
-            if let Some(wlt_address) = &self.selected_wallet {
+            if let Some(wlt_address) = &self.ui_state.selected_wallet {
                 let available_funds = self.get_balance(&wlt_address).unwrap_or(0);
                 ui.label(egui::RichText::new(format!("Available Funds: {}", available_funds)));
             }
@@ -743,13 +773,13 @@ impl MyApp {
             // Receiver Address
             ui.horizontal(|ui| {
                 ui.label("To Address:");
-                ui.text_edit_singleline(&mut self.receiver_address);
+                ui.text_edit_singleline(&mut self.ui_state.receiver_address);
             });
 
             // Amount
             ui.horizontal(|ui| {
                 ui.label("Amount:");
-                ui.add(egui::DragValue::new(&mut self.tx_amount).speed(0.1));
+                ui.add(egui::DragValue::new(&mut self.ui_state.tx_amount).speed(0.1));
                 ui.label("coins");
             });
 
@@ -759,11 +789,11 @@ impl MyApp {
             ui.collapsing("Advanced Options", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Gas Price:");
-                    ui.add(egui::DragValue::new(&mut self.tx_gas_price).speed(0.1));
+                    ui.add(egui::DragValue::new(&mut self.ui_state.tx_gas_price).speed(0.1));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Gas Limit:");
-                    ui.add(egui::DragValue::new(&mut self.tx_gas_limit).speed(0.1));
+                    ui.add(egui::DragValue::new(&mut self.ui_state.tx_gas_limit).speed(0.1));
                 });
             });
 
@@ -773,11 +803,13 @@ impl MyApp {
             ui.horizontal(|ui| {
                 if ui.button("Send Transaction").clicked() {
 
+                    // redesign this !!!! for current sender/receiver
+
                     let (tx_complete, mut rx_complete) = tokio::sync::mpsc::channel::<bool>(1);
 
                     // Extract only the necessary references from `MyApp`
-                    let server = Arc::clone(&self.server);
-                    let utxo_set = Arc::clone(&self.utxo_set);
+                    let server = Arc::clone(&self.net_module.server);
+                    let utxo_set = Arc::clone(&self.bc_module.utxo_set);
 
                     if let Ok((selected_wallet_name, wallet, receiver_address, tx_amount)) = self.valid_tx_fields() {
                         
@@ -846,33 +878,32 @@ impl MyApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
 
                 if ui.button("Create New Wallet").clicked() {
-                    let new_address = self.wallets.create_wallet();
+                    let sender = self.sender.clone(); // Clone the sender for the async task
+
+                    let new_address = self.bc_module.wallets.create_wallet();
                     println!("New wallet address: {}", new_address);
 
-                    if let Err(err) = self.wallets.save_all() {
+                    if let Err(err) = self.bc_module.wallets.save_all() {
                         println!("Error saving wallet: {}", err);
                     }
 
-                    // self.refractor_balances(); - ?
+                    let wallets = self.bc_module.wallets.clone(); // contains the new wallet
+                    let utxo_set = Arc::clone(&self.bc_module.utxo_set);
 
-                    let wallets = self.wallets.clone(); // Assume `Wallets` is clonable
-                    let utxo_set = Arc::clone(&self.utxo_set);
-                    let balances = Arc::new(RwLock::new(self.balances.clone())); // Use Arc<Mutex> for safe shared mutation
-
-                    RUNTIME.spawn({
-                        let balances_clone = Arc::clone(&balances);
-
-                        async move {
-                            let mut balances_lock = balances_clone.write().await; // Lock the mutex for modification
-                            if let Err(err) = MyApp::update_balances(&wallets, utxo_set, &mut *balances_lock).await {
-                                println!("Error updating balances: {}", err);
-                            } else {
-                                println!("Balances successfully updated!");
+                    RUNTIME.spawn(async move {
+                        match MyApp::calculate_new_balances(&wallets, utxo_set).await {
+                            Ok(new_balances) => {
+                                sender.send(TaskMessage::BalancesUpdated(new_balances))
+                                    .await
+                                    .unwrap_or_else(|e| println!("Failed to send balances: {}", e));
+                            }
+                            Err(err) => {
+                                sender.send(TaskMessage::Error(err.to_string()))
+                                    .await
+                                    .unwrap_or_else(|e| println!("Failed to send error: {}", e));
                             }
                         }
-                        
                     });
-
 
 
                     self.add_notification("New wallet created successfully.".to_string());
@@ -882,7 +913,7 @@ impl MyApp {
                 ui.add_space(10.0); // Space between buttons
         
                 if ui.button("Add Existing Wallet").clicked() {
-                    self.show_add_existing_wallet_popup = true;                    
+                    self.ui_state.show_add_existing_wallet_popup = true;                    
                 }
 
                 if ui.button("Refresh Balances").clicked(){
@@ -894,7 +925,7 @@ impl MyApp {
         ui.label("Manage wallets and their transactions.");
 
         // Get immutable data for the loop
-        let all_addresses = self.wallets.get_all_address();
+        let all_addresses = self.bc_module.wallets.get_all_address();
 
         // displays each wallet saved on the device
         egui::ScrollArea::vertical().show(ui, |ui: &mut Ui| {
@@ -958,13 +989,13 @@ impl MyApp {
 
                                     if ui.button(egui::RichText::new("Delete Wallet")).clicked() {
                                         // Set a flag or show a popup
-                                        self.show_delete_popup = Some(address.clone());
+                                        self.ui_state.show_delete_popup = Some(address.clone());
                                     }
                                 });
                                     
                                 // Export Wallet
                                 if ui.button("Export Wallet").clicked() {
-                                    if let Some(wallet) = self.wallets.get_wallet(address) {
+                                    if let Some(wallet) = self.bc_module.wallets.get_wallet(address) {
                                         if let Err(err) = self.export_wallet_to_file(address, wallet) {
                                             println!("Error exporting wallet: {}", err);
                                         }
@@ -975,9 +1006,9 @@ impl MyApp {
                                 if ui.button("Send").clicked() {
                                     println!("Send button clicked for wallet: {}", address);
                                     
-                                    self.active_tab = Tab::Transactions;
+                                    self.ui_state.active_tab = Tab::Transactions;
 
-                                    self.selected_wallet = Some(address.clone());
+                                    self.ui_state.selected_wallet = Some(address.clone());
                                 }
 
                                 // Receive - doesn't do anything
@@ -997,7 +1028,7 @@ impl MyApp {
         let mut delete_wallet_address: Option<String> = None;
 
         // Handle Delete Wallet Popup
-        if let Some(wallet_to_delete) = &self.show_delete_popup.clone() {
+        if let Some(wallet_to_delete) = &self.ui_state.show_delete_popup.clone() {
             egui::Window::new("Confirm Wallet Deletion")
                 .collapsible(false)
                 .resizable(false)
@@ -1010,7 +1041,7 @@ impl MyApp {
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
                             // Close the popup without deleting
-                            self.show_delete_popup = None;
+                            self.ui_state.show_delete_popup = None;
                         }
                         ui.scope(|ui|{
                             ui.style_mut().visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(194, 42, 25);
@@ -1020,7 +1051,7 @@ impl MyApp {
                             if ui.button(egui::RichText::new("Proceed").color(egui::Color32::WHITE)).clicked() {
                                 // Mark wallet for deletion outside this closure
                                 delete_wallet_address = Some(wallet_to_delete.clone());
-                                self.show_delete_popup = None; // Close the popup
+                                self.ui_state.show_delete_popup = None; // Close the popup
 
                             }
                         });
@@ -1034,7 +1065,7 @@ impl MyApp {
             let _ = self.delete_wallet(&wallet_to_delete);
         }
 
-        if self.show_add_existing_wallet_popup {
+        if self.ui_state.show_add_existing_wallet_popup {
             // Start the window for adding an existing wallet
             egui::Window::new("Add Existing Wallet")
             .collapsible(false)
@@ -1049,9 +1080,9 @@ impl MyApp {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Wallet File", &["dat"]).pick_file() {
                         // Deserialize the .dat file to retrieve the wallet
                         if let Ok(wallet) = self.import_wallet_from_file(path) {
-                            self.wallets.insert(&wallet.get_address(), wallet);
+                            self.bc_module.wallets.insert(&wallet.get_address(), wallet);
                             println!("Wallet added from .dat file");
-                            self.show_add_existing_wallet_popup = false;
+                            self.ui_state.show_add_existing_wallet_popup = false;
                         } else {
                             println!("Failed to import wallet from .dat file");
                         }
@@ -1071,16 +1102,16 @@ impl MyApp {
                 ui.horizontal(|ui|{
                     if ui.button("Retrieve Wallet").clicked() {
                         if let Ok(wallet) = self.import_wallet_from_key(&secret_key_input) {
-                            self.wallets.insert(&wallet.get_address(), wallet);
+                            self.bc_module.wallets.insert(&wallet.get_address(), wallet);
                             println!("Wallet retrieved from private key");
     
-                            self.show_add_existing_wallet_popup = false;
+                            self.ui_state.show_add_existing_wallet_popup = false;
                         } else {
                             println!("Failed to retrieve wallet from the provided key");
                         }
                     }
                     if ui.button("Cancel").clicked(){
-                        self.show_add_existing_wallet_popup = false;
+                        self.ui_state.show_add_existing_wallet_popup = false;
                     }
                 });
             });
@@ -1100,7 +1131,7 @@ impl MyApp {
 
         ui.separator();
 
-        match &self.public_ip {
+        match &self.net_module.public_ip {
             Some( Ok(ip) ) => {
                 ui.label(format!("Your Public IP: {}", ip));
             },
@@ -1113,21 +1144,21 @@ impl MyApp {
         }
 
         ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.peer_ip_address_input)
+            ui.add(egui::TextEdit::singleline(&mut self.ui_state.peer_ip_address_input)
                 .hint_text("Input Peer's IP Address"));
 
 
             if ui.button("Add Peer").clicked() {
-                if !self.peer_ip_address_input.is_empty() {
-                    let _ = self.add_peer(self.peer_ip_address_input.clone());
-                    self.peer_ip_address_input.clear();
+                if !self.ui_state.peer_ip_address_input.is_empty() {
+                    let _ = self.add_peer(self.ui_state.peer_ip_address_input.clone());
+                    self.ui_state.peer_ip_address_input.clear();
                 }
             }
         });
 
         // Display the list of connected peers
         ui.label("Connected Peers:");
-        for peer in &self.connected_peers {
+        for peer in &self.ui_state.connected_peers_displayed {
             ui.label(peer);
         }
         // display connected peers - ip address, node type, Functionality (disconnect from peering, )
@@ -1146,7 +1177,7 @@ impl MyApp {
     fn render_notifications(&mut self, ctx: &egui::Context) {
         // Calculate notification timeout and filter out expired notifications
         let now = std::time::Instant::now();
-        self.notifications.retain(|n| now.duration_since(n.start_time).as_secs() < n.duration);
+        self.notif_module.notifications.retain(|n| now.duration_since(n.start_time).as_secs() < n.duration);
     
         // Bottom-right corner positioning
         let screen_rect = ctx.screen_rect();
@@ -1155,7 +1186,7 @@ impl MyApp {
     
         let mut to_remove = Vec::new(); // Collect IDs of notifications to remove
 
-        for notification in &self.notifications {
+        for notification in &self.notif_module.notifications {
             // Calculate the position for this notification
             let notification_rect = egui::Rect::from_min_size(
                 egui::pos2(x_offset, y_offset - 75.0), // Notification height = 50 px
@@ -1212,10 +1243,24 @@ impl MyApp {
             y_offset -= 90.0; // Stack next notification 10 px above the current one
         }
 
-        self.notifications.retain(|n| !to_remove.contains(&n.id));
+        self.notif_module.notifications.retain(|n| !to_remove.contains(&n.id));
 
     }
 
+    fn render_channel_messages(&mut self, ctx: &egui::Context) { 
+        while let Ok(message) = self.receiver.try_recv() {
+            match message {
+                TaskMessage::BalancesUpdated(new_balances) => {
+                    self.bc_module.balances = new_balances;
+                    println!("Balances updated: {:?}", &self.bc_module.balances);
+                }
+                TaskMessage::Error(err) => {
+                    println!("Error occurred: {}", err);
+                    self.add_notification(err); // Display error to the user
+                }
+            }
+        }
+    }
 }
 
 fn convert_timestamp(timestamp: u128) -> String {
