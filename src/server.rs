@@ -81,6 +81,7 @@ enum Message {
 pub struct Server {
     node_address: String,
     mining_address: String,
+
     inner: RwLock<ServerInner>,
 }
 
@@ -115,18 +116,21 @@ impl Server {
         })
     }
 
-    pub async fn start_server(self: Arc<Self>) -> Result<()> {
-        let listener = TcpListener::bind(&self.node_address).await?;
-        println!("Start server at {}, mining address: {}", &self.node_address, &self.mining_address);
-
+    pub async fn start_server(server: Arc<RwLock<Self>>) -> Result<()> {
+        let listener = TcpListener::bind(&server.read().await.node_address).await?;
+        println!(
+            "Start server at {}, mining address: {}",
+            server.read().await.node_address,
+            server.read().await.mining_address
+        );
 
         // Spawn a task for periodic blockchain state checks
-        let server_clone = Arc::clone(&self);
+        let server_clone = Arc::clone(&server);
         tokio::spawn(async move {
             let mut interval_timer = interval(Duration::from_secs(20));
             loop {
                 interval_timer.tick().await;
-                if let Err(e) = server_clone.check_and_update_blockchain_state().await {
+                if let Err(e) = server_clone.read().await.check_and_update_blockchain_state().await {
                     println!("Error during blockchain state check: {}", e);
                 }
             }
@@ -136,24 +140,24 @@ impl Server {
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
-                    let server_clone = Arc::clone(&self);
-        
+                    let server_clone = Arc::clone(&server);
                     tokio::spawn(async move {
-                        if let Err(e) = server_clone.handle_connection(stream).await {
+                        if let Err(e) = server_clone.write().await.handle_connection(stream).await {
                             println!("Error handling connection: {}", e);
                         }
                     });
                 }
-                Err(e) => {
-                    println!("Failed to accept connection: {}", e);
-                }
+                Err(e) => println!("Failed to accept connection: {}", e),
             }
         }
     }
+    
+    
+    
 
-    pub async fn add_peer(&mut self, new_peer:String ) -> Result<()>{
-        let peer_ip = new_peer + ":8334";
-        self.get_known_nodes().await.insert(peer_ip);
+    pub async fn add_peer(&mut self, new_peer_ip:String ) -> Result<()>{
+        self.inner.write().await.known_nodes.insert(new_peer_ip);
+        println!("Chills");
         Ok(())
     }
 
@@ -509,7 +513,7 @@ impl Server {
         self.inner.write().await.known_nodes.insert(String::from(addr));
     }
 
-    async fn get_known_nodes(&self) -> HashSet<String> {
+    pub async fn get_known_nodes(&self) -> HashSet<String> {
         self.inner.read().await.known_nodes.clone()
     }
 

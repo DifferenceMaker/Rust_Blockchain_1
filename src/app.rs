@@ -14,7 +14,7 @@ use tokio::sync::{ oneshot, RwLock, mpsc };
 use crate::blockchain::Blockchain;
 use crate::block::Block;
 use crate::errors::Result;
-use crate::server::Server;
+use crate::server::{self, Server};
 use crate::transaction::Transaction;
 use crate::tx::TXOutputs;
 use crate::utxoset::UTXOSet;
@@ -48,6 +48,8 @@ struct Notification {
 pub enum TaskMessage {
     BalancesUpdated(Vec<i32>),
     Error(String),
+    TransactionSent(bool),
+    PeerAdded(String),
 }
 
 pub struct BlockchainModule {
@@ -58,7 +60,7 @@ pub struct BlockchainModule {
 
 pub struct NetworkModule {
     public_ip: Option<Result<String>>, // Use the custom Result type here
-    server: Arc<Server>,
+    server: Arc<RwLock<Server>>,
 }
 
 pub struct NotificationModule {
@@ -107,7 +109,7 @@ pub struct MyApp {
 
 impl MyApp {
     pub async fn initialize_async() -> Result<Self> {
-        let mut wallets = Wallets::new()?; 
+        let wallets = Wallets::new()?; 
 
         let (sender, receiver) = mpsc::channel(100);
 
@@ -127,23 +129,29 @@ impl MyApp {
 
         let mut current_blocks:Vec<Block> = Vec::new();
 
+        // Load node's blockchain blocks
         for block_hash in &blockchain.read().await.get_block_hashes() {
             current_blocks.push( blockchain.read().await.get_block(block_hash)?.clone() );
         }
         
-        let server = Arc::new(Server::new("8334", &mining_address, Arc::clone(&utxo_set))?);
+        // Create a Server and loop it
+        let server = Arc::new(RwLock::new(Server::new("8334", &mining_address, Arc::clone(&utxo_set))?));
 
-        // Pass an arc-clone to tokio::spawn which is in charge of server logic
         tokio::spawn({
             let server_clone = Arc::clone(&server);
             async move {
-                if let Err(e) = server_clone.start_server().await {
+                if let Err(e) = Server::start_server(server_clone).await {
                     error!("Server error: {}", e);
                 }
             }
         });
 
-         // Fetch Public IP
+        let mut connected_peer_ips: Vec<String> = Vec::new();
+        for address_string in &server.read().await.get_known_nodes().await {
+            connected_peer_ips.push(address_string.to_string());
+        }
+
+        // Fetch Public IP
         let public_ip_result = get_public_ip()
             .await
             .map_err(|e| failure::format_err!("Failed to retrieve public IP: {}", e));
@@ -153,66 +161,56 @@ impl MyApp {
             Err(e) => Some(Err(e)),
         };
         
-        let mut balances: Vec<i32> = Vec::new();
-
-        
+        // Update Balances
+        let balances: Vec<i32> = Vec::new();
         let new_balances = MyApp::calculate_new_balances(&wallets, Arc::clone(&utxo_set)).await?;
         let _ = sender.send(TaskMessage::BalancesUpdated(new_balances)).await;
 
-        let blockchain_module = BlockchainModule {
-            wallets: wallets,
-            balances: balances,
-            utxo_set: Arc::clone(&utxo_set),
-        };
-
-        let network_module = NetworkModule {
-            public_ip: public_ip, // Use the custom Result type here
-            server: Arc::clone(&server),
-        };
-
-        let ui_state = UIState {
-            active_tab: Tab::Blockchain, // -
-
-            // Blockchain Tab
-            blocks: current_blocks,
-            show_transactions: false,
-            blocks_to_display: 5,
-            block_search_query: String::new(),
-            block_search_result: None,
-
-            // Transaction Tab
-            selected_wallet: None,
-            receiver_address: String::from(""),
-            tx_amount: 0,
-            tx_gas_price: 0,
-            tx_gas_limit: 0,
-
-            // Wallets Tab
-            show_delete_popup: None,
-            show_add_existing_wallet_popup: false, 
-
-            // Peers Tab
-            peer_ip_address_input: String::new(),
-            connected_peers_displayed: Vec::new(),
-        };
-        
-        let notification_module = NotificationModule {
-            // Notification Tab
-            notifications: Vec::new(),
-            notification_counter: 0,
-        };
-
         let app = MyApp {
-            bc_module: blockchain_module,
-            net_module: network_module,
-            ui_state: ui_state,
-            notif_module: notification_module,
+            bc_module: BlockchainModule{
+                wallets: wallets,
+                balances: balances,
+                utxo_set: Arc::clone(&utxo_set),
+            },
+            net_module: NetworkModule {
+                public_ip: public_ip, // Use the custom Result type here
+                server: Arc::clone(&server),
+            },
+
+            ui_state: UIState {
+                active_tab: Tab::Blockchain, 
+
+                // Blockchain Tab
+                blocks: current_blocks,
+                show_transactions: false,
+                blocks_to_display: 5,
+                block_search_query: String::new(),
+                block_search_result: None,
+
+                // Transaction Tab
+                selected_wallet: None,
+                receiver_address: String::from(""),
+                tx_amount: 0,
+                tx_gas_price: 0,
+                tx_gas_limit: 0,
+
+                // Wallets Tab
+                show_delete_popup: None,
+                show_add_existing_wallet_popup: false, 
+
+                // Peers Tab
+                peer_ip_address_input: String::new(),
+                connected_peers_displayed: connected_peer_ips,
+            },
+
+            notif_module: NotificationModule {
+                notifications: Vec::new(),
+                notification_counter: 0,
+            },
 
             sender: sender,
             receiver: receiver,
         };
-    
-        // Update balances once during initialization
 
         Ok(app)
     }
@@ -234,7 +232,7 @@ impl MyApp {
             // Calculate the total balance for this address
             let balance: i32 = utxos.outputs.iter().map(|out| out.value).sum();
             
-            println!("address: {}, balance: {}", &address, &balance);
+            //println!("address: {}, balance: {}", &address, &balance);
 
             // Add the balance to the vector
             new_balances.push(balance);
@@ -372,7 +370,7 @@ impl MyApp {
         receiver_address: String,
         tx_amount: i32,
         utxo_set: Arc<RwLock<UTXOSet>>,
-        server: Arc<Server>,
+        server: Arc<RwLock<Server>>,
     ) -> Result<bool> {
         let tx = Transaction::new_utxo(&wallet, &receiver_address, tx_amount, &utxo_set)
             .await
@@ -394,7 +392,7 @@ impl MyApp {
                 .map_err(|e| failure::err_msg(e))?;
 
         } else {
-            server.send_transaction(&tx).await?;
+            server.write().await.send_transaction(&tx).await?;
         }
     
         Ok(true)
@@ -433,16 +431,30 @@ impl MyApp {
     }
 
 
-    fn add_peer(&mut self, new_peer: String) -> Result<()> {
-        println!("Added peer: {}", new_peer);
+    fn add_peer(&mut self, new_peer: String) -> Result<()> {        
+        let sender = self.sender.clone();
+        let server_clone = Arc::clone(&self.net_module.server);
 
-
+        let new_peer_ip = new_peer + ":8337";
+        println!("New_peer_ip: {}", new_peer_ip.clone());
         
-        /*
-            What's the amount of maximum nodes?
-            put in settings max_peers_count
-         */
-        //self.server.add_peer(new_peer);
+        RUNTIME.spawn( async move {
+            match server_clone.write().await.add_peer(new_peer_ip.clone()).await {
+                Ok(_result) => {
+                    println!("ok");
+
+                    // gets stuck here.
+                    for peer in server_clone.read().await.get_known_nodes().await {
+                        println!("Peer: {}", peer);
+                    }
+                    println!("ok2");
+                    let _ = sender.send(TaskMessage::PeerAdded(new_peer_ip)).await;
+                }
+                Err(err) => {
+                    println!("Error while adding peer: {}", err);
+                }
+            }
+        });
 
         Ok(())
     }
@@ -458,7 +470,7 @@ impl Default for MyApp {
         }));
 
         // Use `utxo_set` to create the `server`
-        let server:Arc<Server> = Arc::new(Server::new("8334", "", Arc::clone(&utxo_set)).unwrap());
+        let server = Arc::new(RwLock::new(Server::new("8334", "", Arc::clone(&utxo_set)).unwrap()));
 
         
         Self {
@@ -803,9 +815,7 @@ impl MyApp {
             ui.horizontal(|ui| {
                 if ui.button("Send Transaction").clicked() {
 
-                    // redesign this !!!! for current sender/receiver
-
-                    let (tx_complete, mut rx_complete) = tokio::sync::mpsc::channel::<bool>(1);
+                    let sender = self.sender.clone();
 
                     // Extract only the necessary references from `MyApp`
                     let server = Arc::clone(&self.net_module.server);
@@ -826,19 +836,7 @@ impl MyApp {
                             .unwrap_or(false);
                 
                             // Send the result back to the main thread
-                            let _ = tx_complete.send(result).await;
-                        });
-                        
-                        // Add a separate task to listen to rx_complete
-                        RUNTIME.spawn(async move {
-                            while let Some(success) = rx_complete.recv().await {
-                                if success {
-                                    println!("Transaction successfully propagated.");
-                                    // It is propagated but not mined. 
-                                } else {
-                                    println!("Failed to propagate transaction.");
-                                }
-                            }
+                            let _ = sender.send(TaskMessage::TransactionSent(result)).await;
                         });
                         
                     } else {
@@ -916,9 +914,6 @@ impl MyApp {
                     self.ui_state.show_add_existing_wallet_popup = true;                    
                 }
 
-                if ui.button("Refresh Balances").clicked(){
-                    //let _ = self.update_balances();
-                }
             });
         });
 
@@ -1150,8 +1145,11 @@ impl MyApp {
 
             if ui.button("Add Peer").clicked() {
                 if !self.ui_state.peer_ip_address_input.is_empty() {
+                    
+                    
                     let _ = self.add_peer(self.ui_state.peer_ip_address_input.clone());
                     self.ui_state.peer_ip_address_input.clear();
+                
                 }
             }
         });
@@ -1228,7 +1226,6 @@ impl MyApp {
                                 to_remove.push(notification.id); // Schedule for removal
                             }
 
-
                             // Centered, wrapped label
                             ui.add(egui::Label::new(egui::RichText::new(&notification.message)
                                 .color(egui::Color32::WHITE)
@@ -1257,6 +1254,18 @@ impl MyApp {
                 TaskMessage::Error(err) => {
                     println!("Error occurred: {}", err);
                     self.add_notification(err); // Display error to the user
+                }
+                TaskMessage::TransactionSent(successful) => {
+                    if successful {
+                        self.add_notification(String::from("Successful Transaction!"));
+                    } else {
+                        self.add_notification(String::from("UNSUCCESSFUL Transaction."));
+                    }
+                }
+                TaskMessage::PeerAdded(address) => {
+                    println!("Successfully added: {}", address);
+
+                    
                 }
             }
         }
