@@ -8,13 +8,13 @@ use crypto::ed25519;
 use hex;
 use log::error;
 use std::sync::Arc;
-use tokio::sync::{ oneshot, RwLock, mpsc };
+use tokio::sync::{ RwLock, mpsc };
 
 // My Crates
 use crate::blockchain::Blockchain;
 use crate::block::Block;
 use crate::errors::Result;
-use crate::server::{self, Server};
+use crate::server::Server;
 use crate::transaction::Transaction;
 use crate::tx::TXOutputs;
 use crate::utxoset::UTXOSet;
@@ -448,19 +448,6 @@ impl MyApp {
         RUNTIME.spawn( async move {
             match server_clone.write().await.add_peer(new_peer_ip.clone()).await {
                 Ok(_result) => {
-                    /*println!("ok");
-
-                    // gets stuck here.
-                    let nodes = {
-                        let guard = server_clone.read().await;
-                        guard.get_known_nodes().await // Ensure this is necessary
-                    };
-
-                    for peer in nodes {
-                        println!("Peer: {}", peer);
-                    }
-
-                    println!("ok2");*/
                     let _ = sender.send(TaskMessage::PeerAdded(new_peer_ip)).await;
                 }
                 Err(err) => {
@@ -1155,6 +1142,9 @@ impl MyApp {
             ui.add(egui::TextEdit::singleline(&mut self.ui_state.peer_ip_address_input)
                 .hint_text("Input Peer's IP Address"));
 
+            /*
+                Drop down menu for advanced settings
+             */
 
             if ui.button("Add Peer").clicked() {
                 if !self.ui_state.peer_ip_address_input.is_empty() {
@@ -1277,6 +1267,9 @@ impl MyApp {
                 }
                 TaskMessage::PeerAdded(address) => {
                     println!("Successfully added: {}", address);
+
+                    self.ui_state.connected_peers_displayed.push(address);
+                    
 
                     
                 }

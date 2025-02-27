@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 use tokio::time::{interval, Duration};
 use tokio::sync::RwLock;
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use futures::stream::FuturesUnordered;
 use failure::format_err;
 use serde::{Deserialize, Serialize};
@@ -138,11 +138,10 @@ impl Server {
         // Spawn a task for periodic blockchain state checks
         let server_clone = Arc::clone(&server);
         tokio::spawn(async move {
-            let mut interval_timer = interval(Duration::from_secs(20));
+            let mut interval_timer = interval(Duration::from_secs(5));
 
             /*
                 
-                (I) Implement "Warning Nodes" system - if a node doesn't respond 3 times in a row -> remove it.
                 (II) Copy this project to check if everything works with a 2nd node
                 (III) Try add_peer again (with a 3rd project or another computer).
                 (IV) possible port specification in networking UI?
@@ -207,10 +206,10 @@ impl Server {
         });
         //println!("After adding peer, nodes: {:?}", self.inner.read().await.known_nodes);
 
-        let nodes = self.inner.read().await;
+        /*let nodes = self.inner.read().await;
         for account in &nodes.known_nodes {
             println!("Peer: {}", account.0);
-        }
+        }*/
 
         Ok(())
     }
@@ -231,13 +230,34 @@ impl Server {
             return Ok(());
         }
 
-        //println!("🔵 Attempting connection to {}", addr);
+        println!("🔵 Attempting connection to {}", addr);
         
         let mut stream = match TcpStream::connect(addr).await {
             Ok(s) => s,
             Err(e) => {
-                println!("❌ Failed to connect to {}: {}", addr, e); // Print actual error
-                self.remove_node(addr).await;
+                println!("❌ Failed to connect to {}: {}", addr, e);
+
+                let remove_node = {
+                    let mut guard = self.inner.write().await;
+                    if let Some(node) = guard.known_nodes.get_mut(addr) {
+                        if node.no_response_counter >= 3 {
+                            println!("{} reached max no_response_counter, scheduling removal", addr);
+                            Some(addr.to_string()) // Defer removal
+                        } else {
+                            node.no_response_counter += 1;
+                            println!("{} no_response_counter: {}", addr, node.no_response_counter);
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+                
+                // Perform removal outside the lock
+                if let Some(node_to_remove) = remove_node {
+                    self.remove_node(&node_to_remove).await;
+                }
+
                 return Ok(());
             }
         };
@@ -357,7 +377,7 @@ impl Server {
     async fn handle_addr(&mut self, msg: Vec<String>) -> Result<()> {
         println!("receive address msg: {:#?}", msg);
         for node in msg {
-            self.add_peer(node).await;
+            let _ = self.add_peer(node).await;
         }
         Ok(())
     }
@@ -422,7 +442,7 @@ impl Server {
         self.send_addr(&msg.addr_from).await?;
 
         if !self.node_is_known(&msg.addr_from).await {
-            self.add_peer(msg.addr_from).await;
+            let _ = self.add_peer(msg.addr_from).await;
         }
         Ok(())
     }
@@ -566,6 +586,7 @@ impl Server {
     async fn remove_node(&self, addr: &str) {
         println!("Removing Node: {}", &addr);
         self.inner.write().await.known_nodes.remove(addr);
+        println!("Successful removal");
     }
 
     /*async fn add_nodes(&self, addr: &str) {
