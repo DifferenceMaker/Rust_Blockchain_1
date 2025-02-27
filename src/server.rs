@@ -76,11 +76,14 @@ enum Message {
     Block(Blockmsg),
 }
 
-
-struct KnownNode {
-    ip_address: String,
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct KnownNode {
     no_response_counter: i8,
-
+    // Other information about the node.
+    // last_seen_time?
+    // Version ?
+    // State ?
+    // ...
 }
 
 // - Server -
@@ -92,7 +95,7 @@ pub struct Server {
 }
 
 struct ServerInner {
-    known_nodes: HashSet<String>,
+    known_nodes: HashMap<String, KnownNode>, // IP -> Node Data
 
     // utxo is imported from app.rs, that's why it needs to be Arc. and RwLock.
     utxo: Arc<RwLock<UTXOSet>>,
@@ -103,8 +106,10 @@ struct ServerInner {
 
 impl Server {
     pub fn new(port: &str, miner_address: &str, utxo: Arc<RwLock<UTXOSet>>) -> Result<Server> {
-        let mut node_set = HashSet::new();
-        node_set.insert(String::from(KNOWN_NODE1)); // bootstrap node
+        let mut node_set = HashMap::new();
+        node_set.insert(String::from(KNOWN_NODE1), KnownNode {
+            no_response_counter: 0
+        }); // bootstrap node
 
         Ok(Server {
             node_address: String::from("127.0.0.1:") + port, 
@@ -179,8 +184,7 @@ impl Server {
             self.request_blocks().await?;
         } else {
             let peers: Vec<String> = {
-                let guard = self.inner.read().await;
-                guard.known_nodes.iter().cloned().collect()
+                self.inner.read().await.known_nodes.keys().cloned().collect()
             };
 
             if peers.is_empty() {
@@ -197,13 +201,15 @@ impl Server {
     
 
     pub async fn add_peer(&mut self, new_peer_ip:String ) -> Result<()>{
-        println!("Before adding peer, nodes: {:?}", self.inner.read().await.known_nodes);
-        self.inner.write().await.known_nodes.insert(new_peer_ip);
-        println!("After adding peer, nodes: {:?}", self.inner.read().await.known_nodes);
+        //println!("Before adding peer, nodes: {:?}", self.inner.read().await.known_nodes);
+        self.inner.write().await.known_nodes.insert(new_peer_ip, KnownNode {
+            no_response_counter: 0,
+        });
+        //println!("After adding peer, nodes: {:?}", self.inner.read().await.known_nodes);
 
         let nodes = self.inner.read().await;
         for account in &nodes.known_nodes {
-            println!("Peer: {}", account);
+            println!("Peer: {}", account.0);
         }
 
         Ok(())
@@ -213,7 +219,7 @@ impl Server {
     // Requests blocks from known_nodes
     async fn request_blocks(&self) -> Result<()> {
         for node in self.get_known_nodes().await {
-            self.send_get_blocks(&node).await?
+            self.send_get_blocks(&node.0).await?
         }
         Ok(())
     }
@@ -326,14 +332,15 @@ impl Server {
     // Sends a transaction to every known_node
     pub async fn send_transaction(&self, tx: &Transaction) -> Result<()> {
         println!("Hushhush");
+
         // There are no nodes. Not even localhost.
         for node in &self.get_known_nodes().await {
-            println!("Known_node: {}", node);
+            println!("Known_node: {}", node.0);
         }
 
         let futures: FuturesUnordered<_> = self.get_known_nodes().await
             .into_iter()
-            .map(|node| self.send_tx(node.to_owned(), &tx)) // Pass owned String
+            .map(|node| self.send_tx(node.to_owned().0, &tx)) // Pass owned String
             .collect();
 
         futures.for_each_concurrent(None, |result| async {
@@ -347,10 +354,10 @@ impl Server {
 
     // ---------------------------------- HANDLES ----------------------------------
 
-    async fn handle_addr(&self, msg: Vec<String>) -> Result<()> {
+    async fn handle_addr(&mut self, msg: Vec<String>) -> Result<()> {
         println!("receive address msg: {:#?}", msg);
         for node in msg {
-            self.add_nodes(&node).await;
+            self.add_peer(node).await;
         }
         Ok(())
     }
@@ -399,7 +406,7 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_version(&self, msg: Versionmsg) -> Result<()> {
+    async fn handle_version(&mut self, msg: Versionmsg) -> Result<()> {
         println!("receive version msg: {:#?}", msg);
 
         let my_best_height = self.get_best_height().await?;
@@ -415,7 +422,7 @@ impl Server {
         self.send_addr(&msg.addr_from).await?;
 
         if !self.node_is_known(&msg.addr_from).await {
-            self.add_nodes(&msg.addr_from).await;
+            self.add_peer(msg.addr_from).await;
         }
         Ok(())
     }
@@ -431,8 +438,8 @@ impl Server {
         if self.node_address == KNOWN_NODE1 {
             // if the node is KNOWN_NODE1 then it broadcasts the transaction to all other known nodes except the sender
             for node in known_nodes {
-                if node != self.node_address && node != msg.addr_from {
-                    self.send_inv(&node, "tx", vec![msg.transaction.id.clone()]).await?;
+                if node.0 != self.node_address && node.0 != msg.addr_from {
+                    self.send_inv(&node.0, "tx", vec![msg.transaction.id.clone()]).await?;
                 }
             }
         } else {
@@ -470,8 +477,8 @@ impl Server {
 
                     // Broadcasts the new block to other known nodes.
                     for node in self.get_known_nodes().await {
-                        if node != self.node_address {
-                            self.send_inv(&node, "block", vec![new_block.get_hash()]).await?;
+                        if node.0 != self.node_address {
+                            self.send_inv(&node.0, "block", vec![new_block.get_hash()]).await?;
                         }
                     }
 
@@ -561,11 +568,11 @@ impl Server {
         self.inner.write().await.known_nodes.remove(addr);
     }
 
-    async fn add_nodes(&self, addr: &str) {
+    /*async fn add_nodes(&self, addr: &str) {
         self.inner.write().await.known_nodes.insert(String::from(addr));
-    }
+    }*/
 
-    pub async fn get_known_nodes(&self) -> HashSet<String> {
+    pub async fn get_known_nodes(&self) -> HashMap<String, KnownNode> {
         self.inner.read().await.known_nodes.clone()
     }
 
@@ -602,7 +609,7 @@ impl Server {
 
     // ---------------- Main Handle -------------------
 
-    async fn handle_connection(&self, mut stream: TcpStream) -> Result<()> {
+    async fn handle_connection(&mut self, mut stream: TcpStream) -> Result<()> {
         let mut buffer = Vec::new();
         let count = stream.read_to_end(&mut buffer).await?;
         println!("Accept request: length {}", count);

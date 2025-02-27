@@ -150,7 +150,7 @@ impl MyApp {
 
         let mut connected_peer_ips: Vec<String> = Vec::new();
         for address_string in &server.read().await.get_known_nodes().await {
-            connected_peer_ips.push(address_string.to_string());
+            connected_peer_ips.push(address_string.0.to_string());
         }
 
         // Fetch Public IP
