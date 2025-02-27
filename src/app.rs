@@ -140,6 +140,8 @@ impl MyApp {
         tokio::spawn({
             let server_clone = Arc::clone(&server);
             async move {
+                //println!("Starting server with instance: {:?}", Arc::as_ptr(&server_clone));
+
                 if let Err(e) = Server::start_server(server_clone).await {
                     error!("Server error: {}", e);
                 }
@@ -165,6 +167,9 @@ impl MyApp {
         let balances: Vec<i32> = Vec::new();
         let new_balances = MyApp::calculate_new_balances(&wallets, Arc::clone(&utxo_set)).await?;
         let _ = sender.send(TaskMessage::BalancesUpdated(new_balances)).await;
+
+
+        //println!("Server instance: {:?} init_async", Arc::as_ptr(&server));
 
         let app = MyApp {
             bc_module: BlockchainModule{
@@ -435,19 +440,27 @@ impl MyApp {
         let sender = self.sender.clone();
         let server_clone = Arc::clone(&self.net_module.server);
 
+        //println!("Server instance: {:?} add_peer", Arc::as_ptr(&server_clone));
+
         let new_peer_ip = new_peer + ":8337";
-        println!("New_peer_ip: {}", new_peer_ip.clone());
+        //println!("New_peer_ip: {}", new_peer_ip.clone());
         
         RUNTIME.spawn( async move {
             match server_clone.write().await.add_peer(new_peer_ip.clone()).await {
                 Ok(_result) => {
-                    println!("ok");
+                    /*println!("ok");
 
                     // gets stuck here.
-                    for peer in server_clone.read().await.get_known_nodes().await {
+                    let nodes = {
+                        let guard = server_clone.read().await;
+                        guard.get_known_nodes().await // Ensure this is necessary
+                    };
+
+                    for peer in nodes {
                         println!("Peer: {}", peer);
                     }
-                    println!("ok2");
+
+                    println!("ok2");*/
                     let _ = sender.send(TaskMessage::PeerAdded(new_peer_ip)).await;
                 }
                 Err(err) => {

@@ -77,6 +77,12 @@ enum Message {
 }
 
 
+struct KnownNode {
+    ip_address: String,
+    no_response_counter: i8,
+
+}
+
 // - Server -
 pub struct Server {
     node_address: String,
@@ -94,8 +100,6 @@ struct ServerInner {
     mempool: HashMap<String, Transaction>,
 
 }
-
-
 
 impl Server {
     pub fn new(port: &str, miner_address: &str, utxo: Arc<RwLock<UTXOSet>>) -> Result<Server> {
@@ -124,12 +128,26 @@ impl Server {
             server.read().await.mining_address
         );
 
+        //println!("Server instance: {:?} start_server", Arc::as_ptr(&server));
+
         // Spawn a task for periodic blockchain state checks
         let server_clone = Arc::clone(&server);
         tokio::spawn(async move {
             let mut interval_timer = interval(Duration::from_secs(20));
+
+            /*
+                
+                (I) Implement "Warning Nodes" system - if a node doesn't respond 3 times in a row -> remove it.
+                (II) Copy this project to check if everything works with a 2nd node
+                (III) Try add_peer again (with a 3rd project or another computer).
+                (IV) possible port specification in networking UI?
+
+
+             */
+            
             loop {
                 interval_timer.tick().await;
+
                 if let Err(e) = server_clone.read().await.check_and_update_blockchain_state().await {
                     println!("Error during blockchain state check: {}", e);
                 }
@@ -152,14 +170,6 @@ impl Server {
         }
     }
     
-    
-    
-
-    pub async fn add_peer(&mut self, new_peer_ip:String ) -> Result<()>{
-        self.inner.write().await.known_nodes.insert(new_peer_ip);
-        println!("Chills");
-        Ok(())
-    }
 
     // implement shutdown_server
 
@@ -168,10 +178,37 @@ impl Server {
         if best_height == -1 {
             self.request_blocks().await?;
         } else {
-            self.send_version(KNOWN_NODE1).await?;
+            let peers: Vec<String> = {
+                let guard = self.inner.read().await;
+                guard.known_nodes.iter().cloned().collect()
+            };
+
+            if peers.is_empty() {
+                println!("Empty known_nodes list");
+            } else {                
+                for peer in peers {
+                    self.send_version(&peer).await?;
+                }
+            }
         }
         Ok(())
     }
+
+    
+
+    pub async fn add_peer(&mut self, new_peer_ip:String ) -> Result<()>{
+        println!("Before adding peer, nodes: {:?}", self.inner.read().await.known_nodes);
+        self.inner.write().await.known_nodes.insert(new_peer_ip);
+        println!("After adding peer, nodes: {:?}", self.inner.read().await.known_nodes);
+
+        let nodes = self.inner.read().await;
+        for account in &nodes.known_nodes {
+            println!("Peer: {}", account);
+        }
+
+        Ok(())
+    }
+
 
     // Requests blocks from known_nodes
     async fn request_blocks(&self) -> Result<()> {
@@ -187,17 +224,24 @@ impl Server {
         if addr == &self.node_address {
             return Ok(());
         }
+
+        //println!("🔵 Attempting connection to {}", addr);
+        
         let mut stream = match TcpStream::connect(addr).await {
             Ok(s) => s,
-            Err(_) => {
+            Err(e) => {
+                println!("❌ Failed to connect to {}: {}", addr, e); // Print actual error
                 self.remove_node(addr).await;
                 return Ok(());
             }
         };
 
+        //println!("🟢 Writing data to {}", addr);
+
         let _ = stream.write(data).await;
 
-        println!("data sent successfully");
+        //println!("✅ Data sent successfully to {}", addr);
+
         Ok(())
     }
 
@@ -233,14 +277,21 @@ impl Server {
     }
 
     async fn send_version(&self, addr: &str) -> Result<()> {
-        println!("send version info to: {}", addr);
+        //println!("🔵 Sending version info to: {}", addr);
+
         let data = Versionmsg {
             addr_from: self.node_address.clone(),
             best_height: self.get_best_height().await?,
             version: VERSION,
         };
+
         let data = bincode::serialize(&(cmd_to_bytes("version"), data))?;
-        self.send_data(addr, &data).await
+        //println!("🟢 Serialized data, now sending...");
+
+        let result = self.send_data(addr, &data).await;
+        //println!("✅ Finished send_version for {}", addr);
+
+        result
     }
 
     async fn send_get_blocks(&self, addr: &str) -> Result<()> {
@@ -506,6 +557,7 @@ impl Server {
     }
 
     async fn remove_node(&self, addr: &str) {
+        println!("Removing Node: {}", &addr);
         self.inner.write().await.known_nodes.remove(addr);
     }
 
