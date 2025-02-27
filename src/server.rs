@@ -138,7 +138,7 @@ impl Server {
         // Spawn a task for periodic blockchain state checks
         let server_clone = Arc::clone(&server);
         tokio::spawn(async move {
-            let mut interval_timer = interval(Duration::from_secs(5));
+            let mut interval_timer = interval(Duration::from_secs(20));
 
             /*
                 
@@ -230,10 +230,21 @@ impl Server {
             return Ok(());
         }
 
-        println!("🔵 Attempting connection to {}", addr);
+        //println!("🔵 Attempting connection to {}", addr);
         
         let mut stream = match TcpStream::connect(addr).await {
-            Ok(s) => s,
+            Ok(s) => {
+                let mut guard = self.inner.write().await;
+                if let Some(node) = guard.known_nodes.get_mut(addr) {
+                    if node.no_response_counter > 0 {
+                        // Basically a reset on successful connection if the previous connections were unsuccessful
+                        node.no_response_counter = 0;
+                    }
+                }
+
+                // Return stream
+                s
+            },
             Err(e) => {
                 println!("❌ Failed to connect to {}: {}", addr, e);
 

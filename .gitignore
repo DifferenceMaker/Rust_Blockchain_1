@@ -1,3 +1,5 @@
 /target
-/data
+/data/blocks
+/data/utxos
+/data/wallets
 settings.json

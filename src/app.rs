@@ -1121,7 +1121,7 @@ impl MyApp {
             ui.label("View And Manage Your Peers");
 
             ui.add_space(10.0);
-            ui.label(format!("Peer Count: {}", 5));
+            ui.label(format!("Peer Count: {}", &self.ui_state.connected_peers_displayed.len()));
         });
 
         ui.separator();
