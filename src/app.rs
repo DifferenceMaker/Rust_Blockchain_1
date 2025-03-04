@@ -1,6 +1,6 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use eframe::egui;
-use egui::Ui;
+use egui::{Grid, Ui};
 use failure::Fail;
 use reqwest;
 use bitcoincash_addr::Address;
@@ -9,12 +9,14 @@ use hex;
 use log::error;
 use std::sync::Arc;
 use tokio::sync::{ RwLock, mpsc };
+use std::collections::HashMap;
+use tokio::time::Duration;
 
 // My Crates
 use crate::blockchain::Blockchain;
 use crate::block::Block;
 use crate::errors::Result;
-use crate::server::Server;
+use crate::server::{ Server, KnownNode };
 use crate::transaction::Transaction;
 use crate::tx::TXOutputs;
 use crate::utxoset::UTXOSet;
@@ -91,6 +93,7 @@ pub struct UIState {
 
     // Peers Tab
     peer_ip_address_input: String,
+    peer_port_input: String,
     connected_peers_displayed: Vec<String>,
 }
 
@@ -152,7 +155,7 @@ impl MyApp {
         for address_string in &server.read().await.get_known_nodes().await {
             connected_peer_ips.push(address_string.0.to_string());
         }
-
+       
         // Fetch Public IP
         let public_ip_result = get_public_ip()
             .await
@@ -205,6 +208,7 @@ impl MyApp {
 
                 // Peers Tab
                 peer_ip_address_input: String::new(),
+                peer_port_input: String::from("8334"),
                 connected_peers_displayed: connected_peer_ips,
             },
 
@@ -436,19 +440,19 @@ impl MyApp {
     }
 
 
-    fn add_peer(&mut self, new_peer: String) -> Result<()> {        
+    fn add_peer(&mut self, new_peer_ip: String, new_peer_port: String) -> Result<()> {        
         let sender = self.sender.clone();
         let server_clone = Arc::clone(&self.net_module.server);
 
         //println!("Server instance: {:?} add_peer", Arc::as_ptr(&server_clone));
 
-        let new_peer_ip = new_peer + ":8337";
+        let new_peer_ip_port = new_peer_ip + ":" + &new_peer_port;
         //println!("New_peer_ip: {}", new_peer_ip.clone());
         
         RUNTIME.spawn( async move {
-            match server_clone.write().await.add_peer(new_peer_ip.clone()).await {
+            match server_clone.write().await.add_peer(new_peer_ip_port.clone()).await {
                 Ok(_result) => {
-                    let _ = sender.send(TaskMessage::PeerAdded(new_peer_ip)).await;
+                    let _ = sender.send(TaskMessage::PeerAdded(new_peer_ip_port)).await;
                 }
                 Err(err) => {
                     println!("Error while adding peer: {}", err);
@@ -508,6 +512,7 @@ impl Default for MyApp {
 
                 // Peers Tab
                 peer_ip_address_input: String::new(),
+                peer_port_input: String::from("8334"),
                 connected_peers_displayed: Vec::new(),
             },
             
@@ -1133,35 +1138,57 @@ impl MyApp {
             Some(Err(_)) => {
                 ui.label(format!("Couldn't retrieve your Public IP"));
             },
-            None => {
+            _none => {
                 ui.label("Wait...");
             }
         }
 
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.ui_state.peer_ip_address_input)
-                .hint_text("Input Peer's IP Address"));
+        ui.add(egui::TextEdit::singleline(&mut self.ui_state.peer_ip_address_input)
+            .hint_text("Input Peer's IP Address"));
 
-            /*
-                Drop down menu for advanced settings
-             */
-
-            if ui.button("Add Peer").clicked() {
-                if !self.ui_state.peer_ip_address_input.is_empty() {
-                    
-                    
-                    let _ = self.add_peer(self.ui_state.peer_ip_address_input.clone());
-                    self.ui_state.peer_ip_address_input.clear();
-                
-                }
-            }
+        ui.collapsing("Advanced Options (Optional)", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Port specification:");
+                ui.add(egui::TextEdit::singleline(&mut self.ui_state.peer_port_input)
+                    .hint_text("Set this to 8334 for default port"));
+            });
         });
+
+        if ui.button("Add Peer").clicked() {
+            if !self.ui_state.peer_ip_address_input.is_empty() {
+                
+                let _ = self.add_peer(self.ui_state.peer_ip_address_input.clone(), self.ui_state.peer_port_input.clone());
+                self.ui_state.peer_ip_address_input.clear();
+                self.ui_state.peer_port_input = String::from("8334");
+            
+            }
+        }
+
+        ui.separator();
 
         // Display the list of connected peers
         ui.label("Connected Peers:");
-        for peer in &self.ui_state.connected_peers_displayed {
-            ui.label(peer);
-        }
+        Grid::new("connected_peers_table")
+        .striped(true) // Alternating row colors
+        .show(ui, |ui| {
+            ui.heading("IP Address");
+            ui.heading("Node Type");
+            ui.heading("Actions");
+            ui.end_row();
+
+            for peer in &self.ui_state.connected_peers_displayed {
+                ui.label(peer);  // IP Address
+                ui.label("Full Node"); // Placeholder for Node Type
+
+                // Disconnect Button
+                if ui.button("❌ Disconnect").clicked() {
+                    //self.remove_peer(peer.clone());
+                    println!("Disconnecting: {}", peer);
+                }
+
+                ui.end_row();
+            }
+        });
         // display connected peers - ip address, node type, Functionality (disconnect from peering, )
 
         

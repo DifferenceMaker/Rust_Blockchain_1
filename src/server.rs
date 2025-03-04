@@ -139,15 +139,6 @@ impl Server {
         let server_clone = Arc::clone(&server);
         tokio::spawn(async move {
             let mut interval_timer = interval(Duration::from_secs(20));
-
-            /*
-                
-                (II) Copy this project to check if everything works with a 2nd node
-                (III) Try add_peer again (with a 3rd project or another computer).
-                (IV) possible port specification in networking UI?
-
-
-             */
             
             loop {
                 interval_timer.tick().await;
